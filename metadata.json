@@ -1,0 +1,6 @@
+{
+  "name": "化成箔生产管理系统",
+  "description": "辅助化成箔生产线人员计算倒班任务、预估腐蚀箔耗量、智能规划分卷时间并动态追踪线体接头位置的管理工具。",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
