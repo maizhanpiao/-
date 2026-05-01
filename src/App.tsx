@@ -1,4 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
+import AdminDashboard from "./AdminDashboard";
+import { useAuth } from "./AuthContext";
+import { db } from "./firebase";
+import { doc, getDoc, setDoc, onSnapshot, serverTimestamp } from "firebase/firestore";
+import { handleFirestoreError, OperationType } from "./firestoreErrorHandler";
 import {
   format,
   differenceInMinutes,
@@ -30,6 +35,7 @@ import {
   ChevronLeft,
   Menu,
   X,
+  Database,
 } from "lucide-react";
 import { cn } from "./lib/utils";
 
@@ -1068,9 +1074,7 @@ export default function App() {
   const [simDateStr, setSimDateStr] = useState("");
   const [simTimeStr, setSimTimeStr] = useState("");
 
-  const [activePage, setActivePage] = useState<"dashboard" | "plan">(
-    "dashboard",
-  );
+  const [activePage, setActivePage] = useState<"dashboard" | "plan" | "admin">("dashboard");
 
   // -- Shift info --
   const shiftInfo = getShiftInfo(currentTime);
@@ -1085,6 +1089,12 @@ export default function App() {
   const [punchRecords, setPunchRecords] = useState<
     Record<string, { in: boolean; out: boolean }>
   >({});
+
+  const { user, signIn, logOut } = useAuth();
+  
+  const dateKey = format(currentTime, "yyyy-MM-dd");
+
+
 
   const handlePunch = (shiftId: string, action: "in" | "out") => {
     setPunchRecords((prev) => ({
@@ -1168,55 +1178,9 @@ export default function App() {
   const [lineConfigs, setLineConfigs] = useState<
     Record<LineId, LinePlanConfig>
   >({
-    "24": {
-      cTotal: 2500,
-      cUsed: 800,
-      cPrevUsed: 500,
-      fProduced: 120,
-      fPrevProduced: 0,
-      batchNo: "C-2401",
-      speed: 1.35,
-      futureRolls: [],
-      rolls: [],
-      completedRolls: [
-        {
-          id: "cr-1",
-          batchNo: "24-C1-01",
-          length: 550,
-          unrollTime: "2026-04-26T20:30:00Z",
-        },
-        {
-          id: "cr-2",
-          batchNo: "24-C1-02",
-          length: 550,
-          unrollTime: "2026-04-27T03:15:00Z",
-        },
-      ],
-    },
-    "25": {
-      cTotal: 2500,
-      cUsed: 0,
-      cPrevUsed: 0,
-      fProduced: 0,
-      fPrevProduced: 0,
-      batchNo: "C-2501",
-      speed: 1.3,
-      futureRolls: [],
-      completedRolls: [],
-      rolls: [],
-    },
-    "26": {
-      cTotal: 2500,
-      cUsed: 200,
-      cPrevUsed: 100,
-      fProduced: 250,
-      fPrevProduced: 100,
-      batchNo: "C-2601",
-      speed: 1.38,
-      futureRolls: [],
-      completedRolls: [],
-      rolls: [],
-    },
+    "24": { cTotal: 0, cUsed: 0, cPrevUsed: 0, fProduced: 0, fPrevProduced: 0, batchNo: "", speed: 1.35, futureRolls: [], rolls: [], completedRolls: [] },
+    "25": { cTotal: 0, cUsed: 0, cPrevUsed: 0, fProduced: 0, fPrevProduced: 0, batchNo: "", speed: 1.30, futureRolls: [], rolls: [], completedRolls: [] },
+    "26": { cTotal: 0, cUsed: 0, cPrevUsed: 0, fProduced: 0, fPrevProduced: 0, batchNo: "", speed: 1.38, futureRolls: [], rolls: [], completedRolls: [] }
   });
 
   // -- form states --
@@ -1246,6 +1210,96 @@ export default function App() {
     dinnerStart: 17 + 10 / 60,
     dinnerEnd: 17 + 50 / 60,
   });
+
+  useEffect(() => {
+    if (!user) return;
+    const path = `users/${user.uid}/punchRecords/${dateKey}`;
+    const unsub = onSnapshot(doc(db, 'users', user.uid, 'punchRecords', dateKey), (docSnap) => {
+      if (docSnap.exists()) {
+        try {
+          const data = docSnap.data();
+          if (data.records) {
+             setPunchRecords(JSON.parse(data.records));
+          }
+        } catch (e) {
+             handleFirestoreError(e, OperationType.GET, path);
+        }
+      }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, path);
+    });
+    return () => unsub();
+  }, [user, dateKey]);
+
+  useEffect(() => {
+    if (!user) return;
+    const path = `users/${user.uid}/lineStates/${dateKey}`;
+    const unsub = onSnapshot(doc(db, 'users', user.uid, 'lineStates', dateKey), (docSnap) => {
+      if (docSnap.exists()) {
+        try {
+          const data = docSnap.data();
+          if (data.lineConfigs) setLineConfigs(JSON.parse(data.lineConfigs));
+          if (data.activeSplicing) setActiveSplicing(JSON.parse(data.activeSplicing));
+          if (data.lastWashes) setLastWashes(JSON.parse(data.lastWashes));
+        } catch(e) {
+          handleFirestoreError(e, OperationType.GET, path);
+        }
+      }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, path);
+    });
+    return () => unsub();
+  }, [user, dateKey]);
+
+  // debounce writes to firestore for lineState
+  const firstRenderRef = useRef(true);
+  useEffect(() => {
+    if (firstRenderRef.current) {
+       firstRenderRef.current = false;
+       return;
+    }
+    if (!user) return;
+    const saveState = async () => {
+      const path = `users/${user.uid}/lineStates/${dateKey}`;
+      try {
+        await setDoc(doc(db, 'users', user.uid, 'lineStates', dateKey), {
+          userId: user.uid,
+          dateKey,
+          lineConfigs: JSON.stringify(lineConfigs),
+          activeSplicing: JSON.stringify(activeSplicing),
+          lastWashes: JSON.stringify(lastWashes),
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      } catch (e) {
+        handleFirestoreError(e, OperationType.WRITE, path);
+      }
+    };
+    const timer = setTimeout(saveState, 500);
+    return () => clearTimeout(timer);
+  }, [lineConfigs, activeSplicing, lastWashes, user, dateKey]);
+
+  // debounce writes to firestore for punchRecords
+  useEffect(() => {
+    if (!user) return;
+    // Don't save on initial empty state if we haven't loaded yet
+    if (Object.keys(punchRecords).length === 0) return;
+    
+    const savePunch = async () => {
+      const path = `users/${user.uid}/punchRecords/${dateKey}`;
+      try {
+        await setDoc(doc(db, 'users', user.uid, 'punchRecords', dateKey), {
+          userId: user.uid,
+          dateKey,
+          records: JSON.stringify(punchRecords),
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      } catch (e) {
+        handleFirestoreError(e, OperationType.WRITE, path);
+      }
+    };
+    const timer = setTimeout(savePunch, 500);
+    return () => clearTimeout(timer);
+  }, [punchRecords, user, dateKey]);
 
   const handleCompleteRoll = (lineId: LineId) => {
     const c = lineConfigs[lineId];
@@ -1641,6 +1695,12 @@ export default function App() {
       )}>
         <div className="p-6 relative">
           <div className="flex items-center gap-3 mb-8">
+
+            {user ? (
+               <button onClick={logOut} className="mr-2 text-xs text-blue-200">登出 ({user.email})</button>
+            ) : (
+               <button onClick={signIn} className="mr-2 text-xs text-white bg-blue-600 px-2 py-1 rounded">登录以保存数据</button>
+            )}
             <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl flex items-center justify-center font-bold text-xl text-white shadow-lg shadow-blue-500/20">
               F
             </div>
@@ -1662,6 +1722,17 @@ export default function App() {
               )}
             >
               <LayoutDashboard size={16} /> 工作台指引
+            </button>
+            <button
+              onClick={() => { setActivePage("admin"); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
+                activePage === "admin"
+                  ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
+                  : "hover:bg-slate-800 text-slate-300 hover:text-white",
+              )}
+            >
+              <Database size={16} /> 数据后台
             </button>
             <button
               onClick={() => { setActivePage("plan"); setIsMobileMenuOpen(false); }}
@@ -3484,6 +3555,19 @@ export default function App() {
               </div>
 
             </div>
+          </div>
+        ) : activePage === "admin" ? (
+          <div className="bg-slate-50 flex-1 overflow-auto p-4 sm:p-6 sm:rounded-3xl shadow-sm border border-slate-200">
+            <div className="flex items-center justify-between mb-4">
+              <button 
+                  onClick={() => setActivePage("dashboard")}
+                  className="lg:hidden p-2 -ml-2 text-slate-600 hover:bg-slate-200 rounded-lg transition-colors shrink-0 flex items-center gap-1"
+                >
+                  <ChevronLeft size={24} />
+                  <span className="font-bold text-sm">主页</span>
+              </button>
+            </div>
+            <AdminDashboard />
           </div>
         ) : activePage === "plan" ? (
           <div className="bg-white rounded-none sm:rounded-3xl p-4 sm:p-6 xl:p-8 sm:shadow-sm sm:border border-slate-100 flex-1 flex flex-col overflow-auto h-full">

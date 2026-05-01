@@ -1,0 +1,40 @@
+{
+  "entities": {
+    "PunchRecord": {
+      "title": "Punch Record",
+      "description": "User punch in/out records per shift",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "dateKey": { "type": "string" },
+        "records": { "type": "string", "description": "JSON string of records" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["userId", "dateKey", "records", "updatedAt"]
+    },
+    "LineState": {
+      "title": "Line State",
+      "description": "State of the lines",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "dateKey": { "type": "string" },
+        "lineConfigs": { "type": "string", "description": "JSON string of lineConfigs" },
+        "activeSplicing": { "type": "string", "description": "JSON string of activeSplicing" },
+        "lastWashes": { "type": "string", "description": "JSON string of lastWashes" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["userId", "dateKey", "lineConfigs", "activeSplicing", "lastWashes", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "users/{userId}/punchRecords/{dateKey}": {
+      "schema": { "$ref": "#/entities/PunchRecord" },
+      "description": "Punch records for a specific date/shift"
+    },
+    "users/{userId}/lineStates/{dateKey}": {
+      "schema": { "$ref": "#/entities/LineState" },
+      "description": "State of lines and tasks for a specific date"
+    }
+  }
+}
