@@ -458,12 +458,13 @@ function CombinedPlanTimeline({
             });
 
             return (
-              <div key={lineId} className="flex flex-col group relative w-full mb-2">
+              <div key={lineId} className="flex flex-col group relative w-full mb-14">
                 <div className="flex items-center gap-1.5 mb-1.5 sticky left-0 z-20 w-fit mix-blend-multiply">
                   <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
                   <span className="font-black text-slate-800 text-xs sm:text-sm">{lineId}# 线</span>
                 </div>
-                <div className="relative h-10 sm:h-12 rounded-lg border border-slate-200 shadow-sm bg-white overflow-hidden">
+                <div className="relative h-10 sm:h-12 rounded-lg border border-slate-200 shadow-sm bg-white">
+                  <div className="absolute inset-0 overflow-hidden rounded-lg"></div>
                   <div className="relative h-full w-full pointer-events-auto transition-opacity z-10">
                     <DraggableTimelineLine
                       lineId={lineId}
@@ -591,9 +592,48 @@ function CombinedPlanTimeline({
                                         }}
                                       />
                                     </span>
-                                    <span className={cn("text-sm font-black", roll.isCompleted ? "text-slate-500" : "text-blue-600")}>
-                                      {roll.isCompleted ? roll.actualLength?.toFixed(1) : roll.targetFormedLength.toFixed(1)} m
-                                    </span>
+                                    <span className={cn("text-sm font-black flex flex-col items-end", roll.isCompleted ? "text-slate-500" : "text-blue-600")}>
+                                      <span>{roll.isCompleted ? roll.actualLength?.toFixed(1) : roll.targetFormedLength.toFixed(1)} m</span>
+                                      {!roll.isCompleted && (() => {
+                                         const isFirst = roll.index === 0 && lineConfigs[lineId].fProduced > 0;
+                                         const fProd = isFirst ? lineConfigs[lineId].fProduced : 0;
+                                         const endMs = roll.endT ? roll.endT.getTime() : 0;
+                                         const shiftEndMs = shiftEnd.getTime();
+                                         const spillMins = (endMs - shiftEndMs) / 60000;
+                                         const cConsum = isFirst ? Math.max(0, roll.targetFormedLength - fProd) : roll.targetFormedLength;
+                                         const spillLength = Math.max(0, spillMins * config.speed);
+                                         const nextShiftLength = Math.min(cConsum, spillLength);
+                                         const thisShiftLength = cConsum - nextShiftLength;
+
+                                         if (isFirst && nextShiftLength < 1) {
+                                           return (
+                                             <span className="text-[10px] font-medium text-slate-500 mt-0.5 font-sans">
+                                               ({fProd.toFixed(1)}m 为接班已收, 本班产 {thisShiftLength.toFixed(1)}m)
+                                             </span>
+                                           );
+                                         } else if (isFirst && nextShiftLength >= 1) {
+                                           return (
+                                              <span className="text-[10px] font-bold text-amber-600 mt-0.5 font-sans leading-tight text-right flex flex-col items-end">
+                                                <span>{fProd.toFixed(1)}m 为接班已收</span>
+                                                <span>本班产 {thisShiftLength.toFixed(1)}m, 下班产 {nextShiftLength.toFixed(1)}m</span>
+                                              </span>
+                                           );
+                                         } else if (!isFirst && nextShiftLength >= 1 && thisShiftLength >= 1) {
+                                           return (
+                                             <span className="text-[10px] font-bold text-amber-600 mt-0.5 font-sans leading-tight text-right">
+                                               (本班产 {thisShiftLength.toFixed(1)}m, 下班产 {nextShiftLength.toFixed(1)}m)
+                                             </span>
+                                           );
+                                         } else if (!isFirst && nextShiftLength >= 1 && thisShiftLength < 1) {
+                                           return (
+                                             <span className="text-[10px] font-bold text-amber-600 mt-0.5 font-sans leading-tight text-right">
+                                               (全在下班产)
+                                             </span>
+                                           );
+                                         }
+                                         return null;
+                                       })()}
+                                     </span>
                                   </div>
                                   
                                   {roll.index === 0 && !roll.isCompleted && (
@@ -890,6 +930,8 @@ function DraggableTimelineLine({
 }: any) {
   const barRef = useRef<HTMLDivElement>(null);
   const [draggingIdx, setDraggingIdx] = useState<number | null>(null);
+  const [editingRollIdx, setEditingRollIdx] = useState<number | null>(null);
+  const [editValue, setEditValue] = useState("");
 
   const currMinutesFromStart = differenceInMinutes(currentTime, shiftStart);
 
@@ -916,6 +958,11 @@ function DraggableTimelineLine({
 
       let minAllowedPos = Math.max(prevH + leftMin, nextH - maxL);
       let maxAllowedPos = Math.min(prevH + maxL, nextH - minL);
+
+      if (minAllowedPos > maxAllowedPos) {
+        minAllowedPos = prevH + 50;
+        maxAllowedPos = nextH - 50;
+      }
 
       let clampedNewCum = Math.max(
         minAllowedPos,
@@ -960,7 +1007,7 @@ function DraggableTimelineLine({
   return (
     <div
       ref={barRef}
-      className="absolute inset-0 z-10 select-none overflow-hidden rounded"
+      className="absolute inset-0 z-10 select-none rounded"
     >
       {/* Render completed rolls first */}
       {config.completedRolls?.map((cr: any, i: number) => {
@@ -1007,21 +1054,163 @@ function DraggableTimelineLine({
             maxMinutes) *
           100;
 
+        const duration = endMinutesFromShiftStart - startMinutesFromShiftStart;
+        let visibleCenterPct = 50;
+        let visibleWidthPct = pctWidth;
+        if (duration > 0) {
+          const visibleStartMins = Math.max(0, startMinutesFromShiftStart);
+          const visibleEndMins = Math.max(0, Math.min(maxMinutes, endMinutesFromShiftStart));
+          visibleWidthPct = ((visibleEndMins - visibleStartMins) / maxMinutes) * 100;
+          const visibleMinsCenter = (visibleStartMins + visibleEndMins) / 2;
+          visibleCenterPct =
+            ((visibleMinsCenter - startMinutesFromShiftStart) / duration) * 100;
+        }
+
+        const isPoppedOut = visibleWidthPct < 20;
+
         return (
           <div
             key={roll.id}
-            className="absolute top-0 bottom-0 border-r border-white flex flex-col items-center justify-center group pointer-events-none"
+            className="absolute top-0 bottom-0 border-r border-white group pointer-events-none"
             style={{
               left: `${pctLeft}%`,
               width: `${pctWidth}%`,
               backgroundColor: `hsl(215, 80%, ${i % 2 === 0 ? "90%" : "85%"})`,
             }}
           >
-            {/* Only show label if there's enough space width-wise or it's not off-screen to the left */}
-            {pctLeft + pctWidth > 0 && (
-              <span className="text-[10px] font-black text-blue-900/80 pointer-events-auto">
-                {roll.targetFormedLength.toFixed(1)}m
-              </span>
+            {pctLeft + pctWidth > 0 && pctLeft < 100 && (
+              <div 
+                className={cn(
+                  "absolute flex flex-col items-center pointer-events-auto cursor-pointer active:opacity-60 hover:opacity-80 transition-opacity",
+                  isPoppedOut ? "bottom-full mb-2 z-40 overflow-visible whitespace-nowrap bg-blue-50 px-2 py-1 rounded-md shadow-md border border-blue-400" : "top-0 bottom-0 justify-center overflow-hidden px-1 whitespace-nowrap"
+                )}
+                style={{
+                  left: `${visibleCenterPct}%`,
+                  transform: 'translateX(-50%)'
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setEditingRollIdx(i);
+                  setEditValue(roll.targetFormedLength.toFixed(1));
+                }}
+              >
+                {editingRollIdx === i ? (
+                  <form onSubmit={(e) => {
+                    e.preventDefault();
+                    const el = document.activeElement as HTMLElement;
+                    if (el) el.blur();
+                  }} className="flex items-center">
+                    <input 
+                      autoFocus
+                      type="number"
+                      step="0.1"
+                      className="w-14 px-0.5 py-0 text-xs font-bold text-blue-900 border border-blue-400 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 shadow-inner -my-0.5"
+                      style={{ appearance: 'none', WebkitAppearance: 'none' }}
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      onBlur={() => {
+                        let val = parseFloat(editValue);
+                        if (!isNaN(val) && val !== roll.targetFormedLength) {
+                          let leftMin = minL;
+                          if (i === 0) leftMin = Math.max(minL, config.fProduced);
+                          
+                          let sum = 0;
+                          let otherTarget = 0;
+                          let canBorrow = false;
+                          let borrowIdx = -1;
+                          
+                          if (i < config.rolls.length - 1) {
+                            borrowIdx = i + 1;
+                            otherTarget = config.rolls[i+1].targetFormedLength;
+                            sum = roll.targetFormedLength + otherTarget;
+                            canBorrow = true;
+                          } else if (i > 0) {
+                            borrowIdx = i - 1;
+                            otherTarget = config.rolls[i-1].targetFormedLength;
+                            sum = roll.targetFormedLength + otherTarget;
+                            leftMin = minL;
+                            canBorrow = true;
+                          }
+                          
+                          if (canBorrow) {
+                             const borrowMin = borrowIdx === 0 ? Math.max(minL, config.fProduced) : minL;
+                             const maxAllowed = Math.min(maxL, sum - borrowMin);
+                             const minAllowed = Math.max(leftMin, sum - maxL);
+                             
+                             if (minAllowed <= maxAllowed) {
+                                val = Math.max(minAllowed, Math.min(maxAllowed, val));
+                             } else {
+                                val = Math.max(leftMin, Math.min(maxL, val));
+                             }
+                             
+                             const delta = val - roll.targetFormedLength;
+                             const newRolls = [...config.rolls];
+                             newRolls[i] = { ...newRolls[i], targetFormedLength: val };
+                             newRolls[borrowIdx] = { ...newRolls[borrowIdx], targetFormedLength: newRolls[borrowIdx].targetFormedLength - delta };
+                             updateConfig(lineId, { ...config, rolls: newRolls });
+                          } else {
+                             val = Math.max(leftMin, Math.min(maxL, val));
+                             const newRolls = [...config.rolls];
+                             newRolls[i] = { ...newRolls[i], targetFormedLength: val };
+                             updateConfig(lineId, { ...config, rolls: newRolls });
+                          }
+                        }
+                        setEditingRollIdx(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') setEditingRollIdx(null);
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    <span className="text-xs text-blue-900 font-bold ml-0.5">m</span>
+                  </form>
+                ) : (
+                  <>
+                    {isPoppedOut && (
+                      <div className="absolute top-full left-1/2 -translate-x-1/2 w-px h-2.5 bg-blue-400">
+                        <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1 w-1.5 h-1.5 rotate-45 border-b border-r border-blue-400"></div>
+                      </div>
+                    )}
+                    <span className={cn("font-black text-blue-900/80 truncate", isPoppedOut ? "text-xs" : "text-[10px]")}>
+                      {roll.targetFormedLength.toFixed(1)}m
+                    </span>
+                    
+                    {(() => {
+                      if (startMinutesFromShiftStart > maxMinutes) {
+                        return (
+                          <span className="text-[8px] sm:text-[9px] font-bold text-slate-500 leading-none mt-0.5 truncate">
+                            (全在下班产)
+                          </span>
+                        );
+                      }
+                      
+                      let inShift = roll.targetFormedLength;
+                      if (i === 0) inShift -= config.fProduced; // Subtract what's already produced
+                      
+                      if (endMinutesFromShiftStart > maxMinutes) {
+                         const spillMins = endMinutesFromShiftStart - maxMinutes;
+                         const spillLength = spillMins * config.speed;
+                         inShift = Math.max(0, inShift - spillLength);
+                         
+                         return (
+                            <span className="text-[8px] sm:text-[9px] font-bold text-amber-700/80 leading-none mt-0.5 truncate">
+                              (下班产 {spillLength.toFixed(1)}m)
+                            </span>
+                         );
+                      }
+                      
+                      if (i === 0 && config.fProduced > 0) {
+                         return (
+                          <span className="text-[8px] sm:text-[9px] font-bold text-blue-800/60 leading-none mt-0.5 truncate">
+                            (本班新产 {inShift.toFixed(1)}m)
+                          </span>
+                         );
+                      }
+                      return null;
+                    })()}
+                  </>
+                )}
+              </div>
             )}
           </div>
         );
@@ -2734,7 +2923,9 @@ export default function App() {
 
                           if (computed.length === 0) return null;
 
+                          const shiftStart = getCurrentShiftStart(currentTime);
                           const shiftEnd = getCurrentShiftEnd(currentTime);
+                          const maxMinutes = differenceInMinutes(shiftEnd, shiftStart);
                           let foundNextShift = false;
 
                           const itemsToRender = computed.filter((r) => {
@@ -2796,9 +2987,21 @@ export default function App() {
                                         <div className="w-5 h-5 rounded-full bg-slate-900 flex items-center justify-center text-[10px] font-bold text-slate-300 border border-slate-700">
                                           {i + 1}
                                         </div>
-                                        <span className="text-xs font-bold text-slate-200">
-                                          目标化成箔长度
-                                        </span>
+                                        <div className="flex flex-col">
+                                          <span className="text-xs font-bold text-slate-200">
+                                            目标化成箔长度
+                                          </span>
+                                          {i === 0 && lineConfigs[selectedLine].fProduced > 0 && (
+                                            <span className="text-[10px] text-slate-400 mt-0.5">
+                                              含接班已收 {lineConfigs[selectedLine].fProduced.toFixed(1)}m
+                                            </span>
+                                          )}
+                                          {r.endTime && differenceInMinutes(r.endTime, shiftStart) > maxMinutes && (
+                                            <span className="text-[10px] text-amber-500 mt-0.5">
+                                              部分或全部在下班产
+                                            </span>
+                                          )}
+                                        </div>
                                       </div>
                                       <div className="flex items-center gap-2">
                                         <input
