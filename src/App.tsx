@@ -36,6 +36,7 @@ import {
   Menu,
   X,
   Database,
+  Scissors,
 } from "lucide-react";
 import { cn } from "./lib/utils";
 
@@ -1191,6 +1192,12 @@ export default function App() {
   const [selectedLine, setSelectedLine] = useState<LineId>("24");
 
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState<{title: string, message: string, onConfirm: () => void} | null>(null);
+  const [addFoilDialog, setAddFoilDialog] = useState<boolean>(false);
+  const [addFoilBatch, setAddFoilBatch] = useState<string>("");
+  const [addFoilLength, setAddFoilLength] = useState<string>("");
+  const [cutFoilDialog, setCutFoilDialog] = useState<boolean>(false);
+  const [cutFoilLength, setCutFoilLength] = useState<string>("");
   const [forecastBatch, setForecastBatch] = useState("");
   const [forecastLength, setForecastLength] = useState("");
   const [showCompletedRolls, setShowCompletedRolls] = useState(false);
@@ -2295,46 +2302,71 @@ export default function App() {
 
                         <div className="grid grid-cols-2 gap-3 mb-4">
                           <div className="col-span-2">
-                            <div className="flex justify-between items-end mb-1">
-                              <div className="flex items-center gap-2">
-                                <label className="text-[10px] font-bold text-slate-400 uppercase">
-                                  腐蚀箔总长(m)
-                                </label>
-                                <input
-                                  type="number"
-                                  value={lineConfigs[selectedLine].cTotal || ""}
-                                  onChange={(e) =>
-                                    setLineConfigs((p) => ({
-                                      ...p,
-                                      [selectedLine]: {
-                                        ...p[selectedLine],
-                                        cTotal: Number(e.target.value),
-                                      },
-                                    }))
-                                  }
-                                  className="bg-transparent border-b border-dashed border-slate-600 text-blue-200 text-xs w-16 text-center focus:outline-none font-mono font-bold"
-                                />
+                            <div className="flex justify-between items-end mb-1 flex-wrap gap-2">
+                              <div className="flex flex-wrap items-center gap-4">
+                                <div className="flex items-center gap-2">
+                                  <label className="text-[10px] font-bold text-slate-400 uppercase">
+                                    腐蚀箔总长(m)
+                                  </label>
+                                  <input
+                                    type="number"
+                                    value={lineConfigs[selectedLine].cTotal || ""}
+                                    onChange={(e) =>
+                                      setLineConfigs((p) => ({
+                                        ...p,
+                                        [selectedLine]: {
+                                          ...p[selectedLine],
+                                          cTotal: Number(e.target.value),
+                                        },
+                                      }))
+                                    }
+                                    className="bg-transparent border-b border-dashed border-slate-600 text-blue-200 text-xs w-16 text-center focus:outline-none font-mono font-bold"
+                                  />
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <label className="text-[10px] font-bold text-slate-400 uppercase">
+                                    批号:
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={
+                                      lineConfigs[selectedLine].batchNo || ""
+                                    }
+                                    onChange={(e) =>
+                                      setLineConfigs((p) => ({
+                                        ...p,
+                                        [selectedLine]: {
+                                          ...p[selectedLine],
+                                          batchNo: e.target.value,
+                                        },
+                                      }))
+                                    }
+                                    className="bg-slate-900 border border-slate-700/60 rounded px-2 py-0.5 text-xs text-emerald-300 font-mono font-bold w-32 focus:outline-none focus:border-blue-500 transition-colors"
+                                  />
+                                </div>
                               </div>
                               <div className="flex items-center gap-2">
-                                <label className="text-[10px] font-bold text-slate-400 uppercase">
-                                  批号:
-                                </label>
-                                <input
-                                  type="text"
-                                  value={
-                                    lineConfigs[selectedLine].batchNo || ""
-                                  }
-                                  onChange={(e) =>
-                                    setLineConfigs((p) => ({
-                                      ...p,
-                                      [selectedLine]: {
-                                        ...p[selectedLine],
-                                        batchNo: e.target.value,
-                                      },
-                                    }))
-                                  }
-                                  className="bg-slate-900 border border-slate-700/60 rounded px-2 py-0.5 text-xs text-emerald-300 font-mono font-bold w-32 focus:outline-none focus:border-blue-500 transition-colors"
-                                />
+                                <button
+                                  onClick={() => {
+                                    setCutFoilLength(lineConfigs[selectedLine].fProduced.toString());
+                                    setCutFoilDialog(true);
+                                  }}
+                                  className="bg-orange-600/20 hover:bg-orange-600/40 border border-orange-500/30 text-orange-300 transition-colors px-2.5 py-1 rounded flex items-center gap-1.5 text-[10px] font-bold"
+                                  title="提前结束当前腐蚀箔"
+                                >
+                                  <Scissors size={12} /> 提前割下
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setAddFoilBatch("");
+                                    setAddFoilLength("");
+                                    setAddFoilDialog(true);
+                                  }}
+                                  className="bg-blue-600/20 hover:bg-blue-600/40 border border-blue-500/30 text-blue-300 transition-colors px-2.5 py-1 rounded flex items-center gap-1.5 text-[10px] font-bold"
+                                  title="新增并规划一卷下一批使用的腐蚀箔"
+                                >
+                                  <Plus size={12} /> 新增腐蚀箔
+                                </button>
                               </div>
                             </div>
                             <FoilProgressBar
@@ -2371,6 +2403,44 @@ export default function App() {
                               }
                             />
                           </div>
+
+                          {/* Future queued rolls */}
+                          {lineConfigs[selectedLine].futureRolls && lineConfigs[selectedLine].futureRolls.length > 0 && (
+                            <div className="col-span-2 mb-1 p-3 bg-slate-800/40 border-l-[3px] border-l-blue-500 border border-slate-700/50 flex flex-col gap-2 rounded-r-lg">
+                              <div className="text-[10px] font-bold text-slate-400 uppercase flex items-center justify-between">
+                                <span>后续排队腐蚀箔 ({lineConfigs[selectedLine].futureRolls.length}卷)</span>
+                              </div>
+                              <div className="flex flex-col gap-1.5">
+                                {lineConfigs[selectedLine].futureRolls.map((fr, idx) => (
+                                  <div key={fr.id} className="flex justify-between items-center text-xs bg-slate-900/50 rounded flex-wrap gap-2 px-2.5 py-1.5 border border-slate-700/50 group">
+                                    <div className="flex flex-wrap items-center gap-3 w-max">
+                                      <span className="text-slate-500 font-bold font-mono">#{idx + 1}</span>
+                                      <span className="text-slate-300 font-mono">批号: {fr.batchNo}</span>
+                                      <span className="text-slate-500">|</span>
+                                      <span className="text-emerald-400 font-mono">总长: {fr.length} m</span>
+                                    </div>
+                                    <button
+                                      onClick={() =>
+                                        setLineConfigs((p) => ({
+                                          ...p,
+                                          [selectedLine]: {
+                                            ...p[selectedLine],
+                                            futureRolls: p[selectedLine].futureRolls!.filter(
+                                              (x) => x.id !== fr.id
+                                            ),
+                                          },
+                                        }))
+                                      }
+                                      className="text-red-400 hover:text-red-300 opacity-0 group-hover:opacity-100 transition-opacity p-1"
+                                      title="移除该排队卷"
+                                    >
+                                      <Trash2 size={12} />
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
 
                           {/* Completed Rolls Foldable Area */}
                           <div className="col-span-2 select-none">
@@ -3610,6 +3680,161 @@ export default function App() {
           </div>
         ) : null}
       </main>
+
+      {/* Confirm Dialog Modal */}
+      {confirmDialog && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl shadow-xl max-w-sm w-full mx-auto">
+            <h3 className="text-lg font-bold text-slate-200 mb-2">{confirmDialog.title}</h3>
+            <p className="text-sm text-slate-400 mb-6 leading-relaxed">{confirmDialog.message}</p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setConfirmDialog(null)}
+                className="px-4 py-2 rounded-lg text-sm font-semibold text-slate-300 hover:bg-slate-800 transition-colors"
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  confirmDialog.onConfirm();
+                  setConfirmDialog(null);
+                }}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors shadow-sm"
+                type="button"
+              >
+                确定
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Foil Dialog */}
+      {addFoilDialog && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl shadow-xl max-w-sm w-full mx-auto shadow-blue-900/20">
+            <h3 className="text-lg font-bold text-slate-200 mb-4">新增后续规划腐蚀箔</h3>
+            <div className="space-y-4 mb-6">
+              <div>
+                <label className="block text-xs font-bold text-slate-400 mb-1">批号</label>
+                <input
+                  type="text"
+                  value={addFoilBatch}
+                  onChange={(e) => setAddFoilBatch(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white text-sm focus:outline-none focus:border-blue-500"
+                  placeholder="请输入批号"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-400 mb-1">总长 (m) <span className="text-red-400">*</span></label>
+                <input
+                  type="number"
+                  value={addFoilLength}
+                  onChange={(e) => setAddFoilLength(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white text-sm focus:outline-none focus:border-blue-500"
+                  placeholder="例如: 3500"
+                  autoFocus
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setAddFoilDialog(false)}
+                className="px-4 py-2 rounded-lg text-sm font-semibold text-slate-300 hover:bg-slate-800 transition-colors"
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  if (addFoilLength) {
+                    setLineConfigs((p) => {
+                      const conf = p[selectedLine];
+                      const frs = conf.futureRolls || [];
+                      return {
+                        ...p,
+                        [selectedLine]: {
+                          ...conf,
+                          futureRolls: [
+                            ...frs,
+                            {
+                              id: Math.random().toString(),
+                              batchNo: addFoilBatch,
+                              length: Number(addFoilLength),
+                            },
+                          ],
+                        },
+                      };
+                    });
+                    setAddFoilDialog(false);
+                  }
+                }}
+                disabled={!addFoilLength}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white transition-colors shadow-sm"
+                type="button"
+              >
+                确定加入规划
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cut Foil Dialog */}
+      {cutFoilDialog && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl shadow-xl max-w-sm w-full mx-auto shadow-orange-900/20">
+            <h3 className="text-lg font-bold text-orange-400 mb-2">提前割下腐蚀箔</h3>
+            <p className="text-sm text-slate-400 mb-6 leading-relaxed">这会将当前箔的总长修改为目前已用长度，代表本卷由于各种原因提前结束使用。</p>
+            <div className="space-y-4 mb-6">
+              <div>
+                <label className="block text-xs font-bold text-slate-400 mb-1">割下时的化成箔收卷进度 (m) <span className="text-red-400">*</span></label>
+                <input
+                  type="number"
+                  value={cutFoilLength}
+                  onChange={(e) => setCutFoilLength(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white text-sm focus:outline-none focus:border-orange-500"
+                  placeholder="例如: 200"
+                  autoFocus
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setCutFoilDialog(false)}
+                className="px-4 py-2 rounded-lg text-sm font-semibold text-slate-300 hover:bg-slate-800 transition-colors"
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  if (cutFoilLength) {
+                    setLineConfigs((p) => {
+                      const conf = p[selectedLine];
+                      return {
+                        ...p,
+                        [selectedLine]: {
+                          ...conf,
+                          cTotal: conf.cUsed, // Set etched foil total length to the used amount (as described in the prompt earlier "这会将当前箔的总长修改为目前已用长度")
+                          fProduced: Number(cutFoilLength), // Adjust the formed foil progress
+                        },
+                      };
+                    });
+                    setCutFoilDialog(false);
+                  }
+                }}
+                disabled={!cutFoilLength}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white transition-colors shadow-sm"
+                type="button"
+              >
+                确定割下
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Global utility classes for custom striping */}
       <style
