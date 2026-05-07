@@ -205,6 +205,23 @@ export function getCurrentShiftStart(time: Date) {
   }
 }
 
+export function getPlanningShiftStart(time: Date) {
+  const h = time.getHours();
+  // 提前准备，比如17点以后就算作准备当晚20点的夜班，早上5点以后算作准备8点的白班
+  if (h >= 5 && h < 17) {
+    const start = new Date(time);
+    start.setHours(8, 0, 0, 0);
+    return start;
+  } else {
+    const start = new Date(time);
+    if (h < 5) {
+      start.setDate(start.getDate() - 1);
+    }
+    start.setHours(20, 0, 0, 0);
+    return start;
+  }
+}
+
 export function getCurrentShiftEnd(time: Date) {
   const h = time.getHours();
   if (h >= 8 && h < 20) {
@@ -1259,6 +1276,7 @@ function DraggableTimelineLine({
 
 export default function App() {
   const [timeOffset, setTimeOffset] = useState(0);
+  const [isPlanningMode, setIsPlanningMode] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [showSimulator, setShowSimulator] = useState(false);
   const [simDateStr, setSimDateStr] = useState("");
@@ -1597,12 +1615,29 @@ export default function App() {
   const [observeStage, setObserveStage] = useState(STAGES[0]);
 
   useEffect(() => {
-    const timer = setInterval(
-      () => setCurrentTime(new Date(Date.now() + timeOffset)),
-      1000,
-    );
+    const timer = setInterval(() => {
+      const baseTime = new Date(Date.now() + timeOffset);
+      if (isPlanningMode) {
+        setCurrentTime(getPlanningShiftStart(baseTime));
+      } else {
+        setCurrentTime(baseTime);
+      }
+    }, 1000);
     return () => clearInterval(timer);
-  }, [timeOffset]);
+  }, [timeOffset, isPlanningMode]);
+
+  const handleTogglePlanningMode = () => {
+    setIsPlanningMode((prev) => {
+      const next = !prev;
+      const baseTime = new Date(Date.now() + timeOffset);
+      if (next) {
+        setCurrentTime(getPlanningShiftStart(baseTime));
+      } else {
+        setCurrentTime(baseTime);
+      }
+      return next;
+    });
+  };
 
   const handleOpenSimulator = () => {
     setSimDateStr(format(currentTime, "yyyy-MM-dd"));
@@ -1616,13 +1651,21 @@ export default function App() {
     const targetDate = new Date(year, month - 1, day, hour, min, 0);
     const offset = targetDate.getTime() - Date.now();
     setTimeOffset(offset);
-    setCurrentTime(new Date(Date.now() + offset));
+    if (isPlanningMode) {
+      setCurrentTime(getPlanningShiftStart(new Date(Date.now() + offset)));
+    } else {
+      setCurrentTime(new Date(Date.now() + offset));
+    }
     setShowSimulator(false);
   };
 
   const resetSimulation = () => {
     setTimeOffset(0);
-    setCurrentTime(new Date());
+    if (isPlanningMode) {
+      setCurrentTime(getPlanningShiftStart(new Date()));
+    } else {
+      setCurrentTime(new Date());
+    }
     setShowSimulator(false);
   };
 
@@ -2033,7 +2076,7 @@ export default function App() {
                   <h2 className="text-xl md:text-2xl font-black tracking-tight text-slate-900">
                     执行看版
                   </h2>
-                  <div className="relative inline-block mt-1">
+                  <div className="relative inline-flex items-center mt-1 gap-2">
                   <button
                     onClick={handleOpenSimulator}
                     className="text-[13px] font-semibold text-slate-500 hover:text-blue-600 flex items-center gap-2 px-2 py-1 -ml-2 rounded-lg hover:bg-black/5 transition-colors"
@@ -2058,6 +2101,20 @@ export default function App() {
                       )
                     )}
                     <Settings2 size={14} className="opacity-50 ml-1" />
+                  </button>
+
+                  <button
+                    onClick={handleTogglePlanningMode}
+                    className={cn(
+                      "text-[12px] font-bold px-2.5 py-1 rounded-lg transition-colors border flex items-center gap-1",
+                      isPlanningMode
+                        ? "bg-purple-100 text-purple-700 border-purple-300"
+                        : "bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100",
+                    )}
+                    title="规划模式下，时间会自动锁定在当前班次的开始时间"
+                  >
+                    <Settings2 size={12} />
+                    {isPlanningMode ? "规划模式: 开" : "规划模式: 关"}
                   </button>
 
                   {showSimulator && (
@@ -2650,7 +2707,7 @@ export default function App() {
                                   className="opacity-70"
                                 />
                               </span>
-                              查看已生产的化成箔
+                              手动录入已产化成箔
                               <span className="bg-slate-800 text-[10px] px-1.5 py-0.5 rounded-full text-slate-300">
                                 {lineConfigs[selectedLine].completedRolls
                                   ?.length || 0}{" "}
@@ -2697,24 +2754,25 @@ export default function App() {
                                           className="w-full bg-transparent font-mono text-emerald-400 focus:outline-none text-right [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none [-moz-appearance:textfield]"
                                           value={cr.length || ""}
                                           onChange={(e) =>
-                                            setLineConfigs((p) => ({
-                                              ...p,
-                                              [selectedLine]: {
+                                            setLineConfigs((p) => {
+                                              const newConfig = { ...p };
+                                              const updatedRolls = p[selectedLine].completedRolls!.map((x) =>
+                                                x.id === cr.id ? { ...x, length: Number(e.target.value) } : x
+                                              );
+                                              const newSum = updatedRolls.reduce((sum, r) => sum + (Number(r.length) || 0), 0);
+                                              const lastLength = updatedRolls.length > 0 ? (Number(updatedRolls[updatedRolls.length - 1].length) || 0) : 0;
+                                              const fProducedDiff = lastLength - (p[selectedLine].fPrevProduced || 0);
+                                              
+                                              newConfig[selectedLine] = {
                                                 ...p[selectedLine],
-                                                completedRolls: p[
-                                                  selectedLine
-                                                ].completedRolls!.map((x) =>
-                                                  x.id === cr.id
-                                                    ? {
-                                                        ...x,
-                                                        length: Number(
-                                                          e.target.value,
-                                                        ),
-                                                      }
-                                                    : x,
-                                                ),
-                                              },
-                                            }))
+                                                completedRolls: updatedRolls,
+                                                cPrevUsed: newSum,
+                                                cUsed: Math.max(p[selectedLine].cUsed, newSum),
+                                                fPrevProduced: lastLength,
+                                                fProduced: Math.max(0, p[selectedLine].fProduced + fProducedDiff)
+                                              };
+                                              return newConfig;
+                                            })
                                           }
                                           placeholder="米数"
                                         />
@@ -2756,17 +2814,22 @@ export default function App() {
                                       />
                                       <button
                                         onClick={() =>
-                                          setLineConfigs((p) => ({
-                                            ...p,
-                                            [selectedLine]: {
+                                          setLineConfigs((p) => {
+                                            const newConfig = { ...p };
+                                            const updatedRolls = p[selectedLine].completedRolls!.filter((x) => x.id !== cr.id);
+                                            const newSum = updatedRolls.reduce((sum, r) => sum + (Number(r.length) || 0), 0);
+                                            const lastLength = updatedRolls.length > 0 ? (Number(updatedRolls[updatedRolls.length - 1].length) || 0) : 0;
+                                            const fProducedDiff = lastLength - (p[selectedLine].fPrevProduced || 0);
+
+                                            newConfig[selectedLine] = {
                                               ...p[selectedLine],
-                                              completedRolls: p[
-                                                selectedLine
-                                              ].completedRolls!.filter(
-                                                (x) => x.id !== cr.id,
-                                              ),
-                                            },
-                                          }))
+                                              completedRolls: updatedRolls,
+                                              cPrevUsed: newSum,
+                                              fPrevProduced: lastLength,
+                                              fProduced: Math.max(0, p[selectedLine].fProduced + fProducedDiff)
+                                            };
+                                            return newConfig;
+                                          })
                                         }
                                         className="text-red-400 hover:text-red-300 opacity-50 hover:opacity-100 transition-opacity p-1"
                                       >
@@ -2777,27 +2840,35 @@ export default function App() {
                                 </div>
                                 <button
                                   onClick={() => {
-                                    setLineConfigs((p) => ({
-                                      ...p,
-                                      [selectedLine]: {
+                                    setLineConfigs((p) => {
+                                      const newConfig = { ...p };
+                                      const updatedRolls = [
+                                        ...(p[selectedLine].completedRolls || []),
+                                        {
+                                          id: Math.random().toString(),
+                                          batchNo: "",
+                                          length: 0,
+                                          unrollTime: new Date().toISOString(),
+                                        },
+                                      ];
+                                      
+                                      const newSum = updatedRolls.reduce((sum, r) => sum + (Number(r.length) || 0), 0);
+                                      const lastLength = updatedRolls.length > 0 ? (Number(updatedRolls[updatedRolls.length - 1].length) || 0) : 0;
+                                      const fProducedDiff = lastLength - (p[selectedLine].fPrevProduced || 0);
+
+                                      newConfig[selectedLine] = {
                                         ...p[selectedLine],
-                                        completedRolls: [
-                                          ...(p[selectedLine].completedRolls ||
-                                            []),
-                                          {
-                                            id: Math.random().toString(),
-                                            batchNo: "",
-                                            length: 0,
-                                            unrollTime:
-                                              new Date().toISOString(),
-                                          },
-                                        ],
-                                      },
-                                    }));
+                                        completedRolls: updatedRolls,
+                                        cPrevUsed: newSum,
+                                        fPrevProduced: lastLength,
+                                        fProduced: Math.max(0, p[selectedLine].fProduced + fProducedDiff)
+                                      };
+                                      return newConfig;
+                                    });
                                   }}
                                   className="mt-2 flex items-center gap-1 text-[10px] text-blue-400 font-bold hover:text-blue-300 transition-colors uppercase tracking-wider"
                                 >
-                                  <Plus size={12} /> 添加化成箔卸卷记录
+                                  <Plus size={12} /> 添加化成箔记录
                                 </button>
 
                                 {(!lineConfigs[selectedLine].completedRolls ||
