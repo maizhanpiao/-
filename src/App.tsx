@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import AdminDashboard from "./AdminDashboard";
+import { SettingsPage } from "./SettingsPage";
 import { useAuth } from "./AuthContext";
 import { db } from "./firebase";
 import { doc, getDoc, setDoc, onSnapshot, serverTimestamp } from "firebase/firestore";
@@ -36,7 +37,6 @@ import {
   Menu,
   X,
   Database,
-  Scissors,
 } from "lucide-react";
 import { cn } from "./lib/utils";
 
@@ -1370,7 +1370,7 @@ export default function App() {
   const [simDateStr, setSimDateStr] = useState("");
   const [simTimeStr, setSimTimeStr] = useState("");
 
-  const [activePage, setActivePage] = useState<"dashboard" | "plan" | "admin">("dashboard");
+  const [activePage, setActivePage] = useState<"dashboard" | "plan" | "admin" | "settings">("dashboard");
 
   // -- Shift info --
   const shiftInfo = getShiftInfo(currentTime);
@@ -2107,6 +2107,17 @@ export default function App() {
             >
               <ListTodo size={16} /> 分卷计划
             </button>
+            <button
+              onClick={() => { setActivePage("settings"); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
+                activePage === "settings"
+                  ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
+                  : "hover:bg-slate-800 text-slate-300 hover:text-white",
+              )}
+            >
+              <Settings2 size={16} /> 设置
+            </button>
             <button className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-slate-800 text-slate-300 hover:text-white rounded-lg text-[13px] font-semibold transition-all">
               <Activity size={16} /> 接头动态追踪
             </button>
@@ -2199,130 +2210,7 @@ export default function App() {
                   <h2 className="text-xl md:text-2xl font-black tracking-tight text-slate-900">
                     执行看版
                   </h2>
-                  <div className="relative inline-flex items-center mt-1 gap-2">
-                  <button
-                    onClick={handleOpenSimulator}
-                    className="text-[13px] font-semibold text-slate-500 hover:text-blue-600 flex items-center gap-2 px-2 py-1 -ml-2 rounded-lg hover:bg-black/5 transition-colors"
-                    title="点击开启时间和排程模拟器"
-                  >
-                    <Clock
-                      size={14}
-                      className={
-                        timeOffset !== 0 ? "text-orange-500" : "text-slate-400"
-                      }
-                    />
-                    {format(currentTime, "yyyy年MM月dd日 HH:mm:ss")}
-                    {timeOffset !== 0 ? (
-                      <span className="bg-orange-100 text-orange-700 px-2 py-0.5 rounded text-[10px] ml-1 font-bold border border-orange-200 animate-pulse hidden sm:inline-block">
-                        模拟运行中
-                      </span>
-                    ) : (
-                      shiftInfo.type === "Rest" && (
-                        <span className="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded text-[10px] ml-1 font-bold hidden sm:inline-block">
-                          休息日
-                        </span>
-                      )
-                    )}
-                    <Settings2 size={14} className="opacity-50 ml-1" />
-                  </button>
-
-                  <button
-                    onClick={handleTogglePlanningMode}
-                    className={cn(
-                      "text-[12px] font-bold px-2.5 py-1 rounded-lg transition-colors border flex items-center gap-1",
-                      isPlanningMode
-                        ? "bg-purple-100 text-purple-700 border-purple-300"
-                        : "bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100",
-                    )}
-                    title="规划模式下，时间会自动锁定在当前班次的开始时间"
-                  >
-                    <Settings2 size={12} />
-                    {isPlanningMode ? "规划模式: 开" : "规划模式: 关"}
-                  </button>
-
-                  {showSimulator && (
-                    <div className="absolute top-full left-0 mt-3 w-72 bg-white rounded-xl shadow-[0_10px_40px_-10px_rgba(0,0,0,0.3)] border border-slate-200 z-50 overflow-hidden animate-in fade-in slide-in-from-top-2">
-                      <div className="bg-slate-900 px-4 py-3 border-b border-slate-800 flex justify-between items-center">
-                        <h4 className="text-white font-bold text-sm flex items-center gap-2">
-                          <Settings2 size={14} className="text-blue-400" />
-                          系统时钟控制中心
-                        </h4>
-                        <button
-                          onClick={() => setShowSimulator(false)}
-                          className="text-slate-400 hover:text-white"
-                        >
-                          &times;
-                        </button>
-                      </div>
-                      <div className="p-4 space-y-4">
-                        <p className="text-[10px] text-slate-500 font-medium">
-                          调整系统时间，快速切换工作日/休息日状态或测试交接班、排产规划等不同时间场景。
-                        </p>
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
-                              目标日期
-                            </label>
-                            <input
-                              type="date"
-                              value={simDateStr}
-                              onChange={(e) => setSimDateStr(e.target.value)}
-                              className="w-full text-xs p-2 border border-slate-200 bg-slate-50 rounded-lg outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
-                              目标时间
-                            </label>
-                            <input
-                              type="time"
-                              value={simTimeStr}
-                              onChange={(e) => setSimTimeStr(e.target.value)}
-                              className="w-full text-xs p-2 border border-slate-200 bg-slate-50 rounded-lg outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                            />
-                          </div>
-                        </div>
-                        <div className="flex gap-2">
-                          <button
-                            onClick={resetSimulation}
-                            className="flex-1 py-2.5 bg-slate-100 text-slate-600 border border-slate-200 text-xs font-bold rounded-lg hover:bg-slate-200 transition-colors"
-                          >
-                            恢复实际
-                          </button>
-                          <button
-                            onClick={applySimulation}
-                            className="flex-1 py-2.5 bg-blue-600 text-white text-xs font-bold rounded-lg hover:bg-blue-500 shadow-lg shadow-blue-500/20 transition-colors"
-                          >
-                            应用模拟
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
                 </div>
-              </div>
-              </div>
-
-              {/* Quick status pills */}
-              <div className="flex gap-3">
-                <div className="bg-white border border-slate-200 px-4 py-2.5 rounded-xl shadow-sm flex flex-col justify-center">
-                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-0.5">
-                    当前排程
-                  </span>
-                  <span className="text-sm font-bold text-slate-700">
-                    {viewShiftInfo.timeStr}
-                  </span>
-                </div>
-                {viewShiftInfo.type === "Day" && (
-                  <div className="bg-orange-50/80 border border-orange-200/60 px-4 py-2.5 rounded-xl shadow-sm flex flex-col justify-center">
-                    <span className="text-[10px] font-black text-orange-500 uppercase tracking-widest mb-0.5">
-                      即将到来的进餐约束
-                    </span>
-                    <span className="text-sm font-bold text-orange-700 flex items-center gap-1.5">
-                      <AlertCircle size={14} /> 11:35 或 17:10
-                    </span>
-                  </div>
-                )}
               </div>
             </header>
 
@@ -2331,53 +2219,6 @@ export default function App() {
               <div className="w-full max-w-full flex flex-col gap-6 xl:overflow-y-auto pr-2 pb-4 hide-scrollbar">
                 {/* 12 Hour Shift Timeline */}
                 <section className="bg-white rounded-2xl shadow-sm border border-slate-200 shrink-0">
-                  <div className="p-4 border-b border-slate-100 flex items-center justify-between">
-                    <h3 className="font-bold flex items-center gap-2 text-slate-800">
-                      <Activity size={18} className="text-blue-500" />
-                      当前班次宏观规划图
-                      <span className="text-xs font-normal text-slate-400 ml-2">
-                        (
-                        {getCurrentShiftStart(currentTime).getHours() === 20
-                          ? "20:00 - 08:00"
-                          : "08:00 - 20:00"}
-                        )
-                      </span>
-                    </h3>
-                    <button 
-                      onClick={() => {
-                        const curLS = `${Math.floor(mealConfig.lunchStart)}:${Math.floor((mealConfig.lunchStart % 1) * 60).toString().padStart(2, "0")}`;
-                        const curLE = `${Math.floor(mealConfig.lunchEnd)}:${Math.floor((mealConfig.lunchEnd % 1) * 60).toString().padStart(2, "0")}`;
-                        const curDS = `${Math.floor(mealConfig.dinnerStart)}:${Math.floor((mealConfig.dinnerStart % 1) * 60).toString().padStart(2, "0")}`;
-                        const curDE = `${Math.floor(mealConfig.dinnerEnd)}:${Math.floor((mealConfig.dinnerEnd % 1) * 60).toString().padStart(2, "0")}`;
-                        const isNight = getCurrentShiftStart(currentTime).getHours() === 20;
-
-                        const curS = isNight ? curDS : curLS;
-                        const curE = isNight ? curDE : curLE;
-
-                        const res = prompt(
-                          `${isNight ? "夜间" : "白班"}进餐时间范围 (格式: HH:MM-HH:MM)`,
-                          `${curS}-${curE}`
-                        );
-                        if (res && res.includes("-")) {
-                          const parts = res.split("-");
-                          if (parts.length === 2 && parts[0].includes(":") && parts[1].includes(":")) {
-                            const [sh, sm] = parts[0].split(":").map(Number);
-                            const [eh, em] = parts[1].split(":").map(Number);
-                            if (!isNaN(sh) && !isNaN(sm) && !isNaN(eh) && !isNaN(em)) {
-                              setMealConfig(p => ({
-                                ...p,
-                                ...(!isNight ? { lunchStart: sh + sm / 60, lunchEnd: eh + em / 60 } : { dinnerStart: sh + sm / 60, dinnerEnd: eh + em / 60 })
-                              }));
-                            }
-                          }
-                        }
-                      }}
-                      className="text-xs text-blue-500 hover:text-blue-600 underline font-medium"
-                    >
-                      设置进餐时间
-                    </button>
-                  </div>
-
                   <div className="p-4 flex flex-col gap-2 relative">
                     {/* Vertical Timeline Track */}
                     <div className="absolute left-[39px] top-6 bottom-4 w-px bg-slate-200 z-0"></div>
@@ -2506,17 +2347,9 @@ export default function App() {
                 </section>
               {/* Tactical Action Terminal (Right Column) */}
               <div className="flex flex-col overflow-hidden bg-slate-900 rounded-2xl shadow-xl border border-slate-800 shrink-0 h-auto min-h-[500px]">
-                <div className="p-5 border-b border-slate-800 shrink-0">
-                  <h3 className="text-white font-bold tracking-wider flex items-center gap-2">
-                    <Wrench size={18} className="text-blue-400" />
-                    现场作业终端机
-                  </h3>
-                  <p className="text-xs text-slate-400 mt-1">
-                    记录现场动态，辅助算法校准与预测
-                  </p>
-
+                <div className="p-3 border-b border-slate-800 shrink-0">
                   {/* Target Line Selector global for the terminal */}
-                  <div className="mt-5 bg-slate-950 p-2 rounded-xl flex gap-1">
+                  <div className="bg-slate-950 p-1.5 rounded-xl flex gap-1">
                     {LINES.map((line) => (
                       <button
                         key={line}
@@ -3715,211 +3548,7 @@ export default function App() {
                 </div>
               </div>
 
-                {/* Middle Section: Alerts and Active Tasks */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 shrink-0">
-                  {/* Splicing Tasks Panel */}
-                  <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 flex flex-col h-[280px]">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="font-bold flex items-center gap-2 text-slate-800">
-                        <Scissors size={18} className="text-orange-500" />
-                        接箔与过架进程监控
-                      </h3>
-                      <span className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded text-[10px] font-bold">
-                        {updatedSplicingTasks.length} 项进行中
-                      </span>
-                    </div>
 
-                    <div className="flex-1 overflow-y-auto space-y-3 pr-1 hide-scrollbar">
-                      {updatedSplicingTasks.length === 0 ? (
-                        <div className="h-full flex flex-col items-center justify-center text-slate-400 opacity-80">
-                          <CheckSquare size={32} className="mb-2 opacity-50" />
-                          <p className="text-xs font-medium">
-                            当前无正在进行的接箔作业
-                          </p>
-                        </div>
-                      ) : (
-                        updatedSplicingTasks.map((task) => (
-                          <div
-                            key={task.id}
-                            className={cn(
-                              "p-4 rounded-xl border flex flex-col gap-3 transition-all",
-                              task.urgency === "critical"
-                                ? "bg-red-50 border-red-200"
-                                : task.urgency === "warning"
-                                  ? "bg-orange-50 border-orange-200"
-                                  : "bg-slate-50 border-slate-200",
-                            )}
-                          >
-                            <div className="flex justify-between items-start">
-                              <div className="flex items-center gap-2">
-                                <span
-                                  className={cn(
-                                    "px-1.5 py-0.5 rounded text-[10px] font-black tracking-wider text-white",
-                                    task.line === "24"
-                                      ? "bg-blue-600"
-                                      : task.line === "25"
-                                        ? "bg-indigo-600"
-                                        : "bg-violet-600",
-                                  )}
-                                >
-                                  {task.line}#
-                                </span>
-                                <span
-                                  className={cn(
-                                    "text-xs font-bold",
-                                    task.urgency === "critical"
-                                      ? "text-red-700"
-                                      : task.urgency === "warning"
-                                        ? "text-orange-700"
-                                        : "text-slate-700",
-                                  )}
-                                >
-                                  {task.displayStatus}
-                                </span>
-                              </div>
-                              <span className="text-[10px] font-mono text-slate-500 font-bold">
-                                自 {format(task.startTime, "HH:mm")} 开始
-                              </span>
-                            </div>
-
-                            {/* Mini Progress bar */}
-                            <div className="h-1.5 w-full bg-black/5 rounded-full overflow-hidden">
-                              <div
-                                className={cn(
-                                  "h-full rounded-full transition-all duration-1000",
-                                  task.urgency === "critical"
-                                    ? "bg-red-500"
-                                    : task.urgency === "warning"
-                                      ? "bg-orange-500"
-                                      : "bg-slate-600",
-                                )}
-                                style={{
-                                  width: `${Math.min(100, task.progress)}%`,
-                                }}
-                              ></div>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </section>
-
-                  {/* Wash Status Panel */}
-                  <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 flex flex-col h-[280px]">
-                    <h3 className="font-bold flex items-center gap-2 text-slate-800 mb-4">
-                      <Droplets size={18} className="text-blue-400" />
-                      结晶冲洗状态预警 (目标: 约2H/次)
-                    </h3>
-
-                    <div className="flex-1 flex flex-col justify-around">
-                      {LINES.map((line) => {
-                        const lastWash = lastWashes[line];
-                        let statusText = "暂无记录 (需冲洗)";
-                        let statusColor =
-                          "text-slate-500 bg-slate-100 border-slate-200";
-                        let barColor = "bg-slate-200";
-                        let elapsedMin = 0;
-
-                        if (lastWash) {
-                          elapsedMin = differenceInMinutes(
-                            currentTime,
-                            lastWash,
-                          );
-                          if (elapsedMin < 90) {
-                            statusText = `安全范围内 (${elapsedMin}m)`;
-                            statusColor =
-                              "text-emerald-700 bg-emerald-50 border-emerald-200";
-                            barColor = "bg-emerald-400";
-                          } else if (elapsedMin < 120) {
-                            statusText = `准备冲洗 (${elapsedMin}m 预警)`;
-                            statusColor =
-                              "text-orange-700 bg-orange-50 border-orange-200";
-                            barColor = "bg-orange-400";
-                          } else {
-                            statusText = `急需冲洗 超时 (${Math.floor(elapsedMin / 60)}h ${elapsedMin % 60}m)`;
-                            statusColor =
-                              "text-red-700 bg-red-50 border-red-200 animate-pulse";
-                            barColor = "bg-red-500";
-                          }
-                        }
-
-                        return (
-                          <div
-                            key={line}
-                            className="flex items-center gap-4 group"
-                          >
-                            <div className="w-10 h-10 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-center shadow-sm shrink-0">
-                              <span className="text-sm font-black text-slate-700">
-                                {line}#
-                              </span>
-                            </div>
-                            <div
-                              className={cn(
-                                "flex-1 relative border rounded-lg p-2.5 overflow-hidden flex justify-between items-center transition-colors",
-                                statusColor,
-                              )}
-                            >
-                              <span className="text-xs font-bold relative z-10">
-                                {statusText}
-                              </span>
-                              <span className="text-[10px] font-mono opacity-60 font-bold relative z-10 truncate ml-2">
-                                {lastWash
-                                  ? `已上次于 ${format(lastWash, "HH:mm")}`
-                                  : ""}
-                              </span>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </section>
-                </div>
-
-                {/* Context/Line metrics... */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 sm:divide-x divide-y sm:divide-y-0 border border-slate-200 bg-white rounded-2xl shadow-sm overflow-hidden shrink-0">
-                  <div className="p-4 sm:p-5 flex items-center gap-4 hover:bg-slate-50 transition-colors">
-                    <div className="w-10 h-10 sm:w-12 sm:h-12 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center shrink-0">
-                      <Package size={20} />
-                    </div>
-                    <div>
-                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-0.5">
-                        24#线合规长度
-                      </p>
-                      <p className="text-base sm:text-lg font-bold">
-                        400-550
-                        <span className="text-xs text-slate-500 ml-1">m</span>
-                      </p>
-                    </div>
-                  </div>
-                  <div className="p-4 sm:p-5 flex items-center gap-4 hover:bg-slate-50 transition-colors">
-                    <div className="w-10 h-10 sm:w-12 sm:h-12 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center shrink-0">
-                      <Package size={20} />
-                    </div>
-                    <div>
-                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-0.5">
-                        25#线合规长度
-                      </p>
-                      <p className="text-base sm:text-lg font-bold">
-                        300-800
-                        <span className="text-xs text-slate-500 ml-1">m</span>
-                      </p>
-                    </div>
-                  </div>
-                  <div className="p-4 sm:p-5 flex items-center gap-4 hover:bg-slate-50 transition-colors">
-                    <div className="w-10 h-10 sm:w-12 sm:h-12 bg-violet-50 text-violet-600 rounded-full flex items-center justify-center shrink-0">
-                      <Package size={20} />
-                    </div>
-                    <div>
-                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-0.5">
-                        26#线合规长度
-                      </p>
-                      <p className="text-base sm:text-lg font-bold">
-                        400-550
-                        <span className="text-xs text-slate-500 ml-1">m</span>
-                      </p>
-                    </div>
-                  </div>
-                </div>
               </div>
 
             </div>
@@ -3976,6 +3605,29 @@ export default function App() {
               />
             </div>
           </div>
+        ) : activePage === "settings" ? (
+          <SettingsPage 
+            updatedSplicingTasks={updatedSplicingTasks}
+            lastWashes={lastWashes}
+            currentTime={currentTime}
+            LINES={LINES}
+            setActivePage={setActivePage}
+            handleOpenSimulator={handleOpenSimulator}
+            timeOffset={timeOffset}
+            shiftInfo={shiftInfo}
+            handleTogglePlanningMode={handleTogglePlanningMode}
+            isPlanningMode={isPlanningMode}
+            showSimulator={showSimulator}
+            setShowSimulator={setShowSimulator}
+            simDateStr={simDateStr}
+            setSimDateStr={setSimDateStr}
+            simTimeStr={simTimeStr}
+            setSimTimeStr={setSimTimeStr}
+            resetSimulation={resetSimulation}
+            applySimulation={applySimulation}
+            mealConfig={mealConfig}
+            setMealConfig={setMealConfig}
+          />
         ) : null}
       </main>
 
