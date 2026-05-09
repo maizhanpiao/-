@@ -328,6 +328,7 @@ function CombinedPlanTimeline({
   lineConfigs,
   updateConfig,
   currentTime,
+  isPlanningMode,
   rollCompletionInputs,
   setRollCompletionInputs,
   rollCompletionTimeInputs,
@@ -337,6 +338,7 @@ function CombinedPlanTimeline({
   lineConfigs: Record<LineId, LinePlanConfig>;
   updateConfig: (id: LineId, c: LinePlanConfig) => void;
   currentTime: Date;
+  isPlanningMode: boolean;
   rollCompletionInputs: Record<LineId, string>;
   setRollCompletionInputs: React.Dispatch<React.SetStateAction<Record<LineId, string>>>;
   rollCompletionTimeInputs: Record<LineId, string>;
@@ -488,8 +490,8 @@ function CombinedPlanTimeline({
                     const groups: { batchNumber: string; rolls: (PlannedRoll & { index: number, endT: Date })[] }[] = [];
                     let currentGroup: any = null;
 
-                    // Add completed rolls first
-                    if (config.completedRolls) {
+                    // Add completed rolls first if not in planning mode
+                    if (!isPlanningMode && config.completedRolls) {
                       config.completedRolls.forEach((cr, i) => {
                         const batchNo = cr.corrosionBatchNo || "无批号";
                         if (!currentGroup || currentGroup.batchNumber !== batchNo) {
@@ -1550,8 +1552,9 @@ export default function App() {
   const [addFoilLength, setAddFoilLength] = useState<string>("");
   const [cutFoilDialog, setCutFoilDialog] = useState<boolean>(false);
   const [cutFoilLength, setCutFoilLength] = useState<string>("");
-  const [forecastBatch, setForecastBatch] = useState("");
-  const [forecastLength, setForecastLength] = useState("");
+  const [forecastBatches, setForecastBatches] = useState<Record<string, string>>({});
+  const [forecastLengths, setForecastLengths] = useState<Record<string, string>>({});
+  const [showOnlyJointPrep, setShowOnlyJointPrep] = useState(false);
   const [showCompletedRolls, setShowCompletedRolls] = useState(false);
   const [rollCompletionInputs, setRollCompletionInputs] = useState<Record<LineId, string>>({
     "24": "",
@@ -1578,7 +1581,10 @@ export default function App() {
         try {
           const data = docSnap.data();
           if (data.records) {
-             setPunchRecords(JSON.parse(data.records));
+            setPunchRecords(prev => {
+              const currentStr = JSON.stringify(prev);
+              return currentStr !== data.records ? JSON.parse(data.records) : prev;
+            });
           }
         } catch (e) {
              handleFirestoreError(e, OperationType.GET, path);
@@ -1597,9 +1603,24 @@ export default function App() {
       if (docSnap.exists()) {
         try {
           const data = docSnap.data();
-          if (data.lineConfigs) setLineConfigs(JSON.parse(data.lineConfigs));
-          if (data.activeSplicing) setActiveSplicing(JSON.parse(data.activeSplicing));
-          if (data.lastWashes) setLastWashes(JSON.parse(data.lastWashes));
+          if (data.lineConfigs) {
+            setLineConfigs(prev => {
+              const currentStr = JSON.stringify(prev);
+              return currentStr !== data.lineConfigs ? JSON.parse(data.lineConfigs) : prev;
+            });
+          }
+          if (data.activeSplicing) {
+            setActiveSplicing(prev => {
+              const currentStr = JSON.stringify(prev);
+              return currentStr !== data.activeSplicing ? JSON.parse(data.activeSplicing) : prev;
+            });
+          }
+          if (data.lastWashes) {
+             setLastWashes(prev => {
+              const currentStr = JSON.stringify(prev);
+              return currentStr !== data.lastWashes ? JSON.parse(data.lastWashes) : prev;
+            });
+          }
         } catch(e) {
           handleFirestoreError(e, OperationType.GET, path);
         }
@@ -1737,27 +1758,29 @@ export default function App() {
     setRollCompletionTimeInputs((prev) => ({ ...prev, [lineId]: "" }));
   };
 
-  const handleAddFutureRoll = () => {
-    if (!forecastBatch || !forecastLength) return;
-    const lineConf = lineConfigs[selectedLine];
+  const handleAddFutureRoll = (lineId: LineId) => {
+    const fBatch = forecastBatches[lineId];
+    const fLength = forecastLengths[lineId];
+    if (!fBatch || !fLength) return;
+    const lineConf = lineConfigs[lineId];
     const frs = lineConf.futureRolls || [];
     const newConfigs = {
       ...lineConfigs,
-      [selectedLine]: {
+      [lineId]: {
         ...lineConf,
         futureRolls: [
           ...frs,
           {
             id: Math.random().toString(),
-            batchNo: forecastBatch,
-            length: Number(forecastLength),
+            batchNo: fBatch,
+            length: Number(fLength),
           },
         ],
       },
     };
-    handleGeneratePlan(selectedLine, newConfigs);
-    setForecastBatch("");
-    setForecastLength("");
+    handleGeneratePlan(lineId, newConfigs);
+    setForecastBatches(p => ({ ...p, [lineId]: "" }));
+    setForecastLengths(p => ({ ...p, [lineId]: "" }));
   };
 
   const handleRemoveFutureRoll = (id: string) => {
@@ -2304,37 +2327,45 @@ export default function App() {
                         type: 'completed' | 'plan';
                         length: number;
                         isJoint?: boolean;
+                        frontStartTime?: Date;
                       };
 
                       let allEvents: TimelineEvent[] = [];
 
                       LINES.forEach(lineId => {
                         const mappedRolls = getComputedPlanForLine(lineId);
-                        const completedRolls = lineConfigs[lineId].completedRolls || [];
                         
-                        completedRolls.forEach(cr => {
-                          const t = new Date(cr.unrollTime);
-                          if (t.getTime() >= shiftS.getTime() && t.getTime() <= shiftE.getTime()) {
-                            allEvents.push({
-                              id: `c-${lineId}-${cr.id}`,
-                              time: t,
-                              lineId,
-                              type: 'completed',
-                              length: Number(cr.length) || 0
-                            });
-                          }
-                        });
+                        if (!isPlanningMode) {
+                          const completedRolls = lineConfigs[lineId].completedRolls || [];
+                          completedRolls.forEach(cr => {
+                            const t = new Date(cr.unrollTime);
+                            if (t.getTime() >= shiftS.getTime() && t.getTime() <= shiftE.getTime()) {
+                              allEvents.push({
+                                id: `c-${lineId}-${cr.id}`,
+                                time: t,
+                                lineId,
+                                type: 'completed',
+                                length: Number(cr.length) || 0
+                              });
+                            }
+                          });
+                        }
 
                         mappedRolls.forEach(r => {
                           const t = r.endTime;
                           if (t.getTime() >= shiftS.getTime() && t.getTime() <= shiftE.getTime()) {
+                            let frontStartTime: Date | undefined;
+                            if (r.isJoint) {
+                              frontStartTime = new Date(t.getTime() - (240 / lineConfigs[lineId].speed) * 60000);
+                            }
                             allEvents.push({
                               id: `p-${lineId}-${r.id}`,
                               time: t,
                               lineId,
                               type: 'plan',
                               length: r.targetFormedLength,
-                              isJoint: r.isJoint
+                              isJoint: r.isJoint,
+                              frontStartTime
                             });
                           }
                         });
@@ -2393,8 +2424,15 @@ export default function App() {
                                   </div>
                                   <div className="flex-1 flex flex-col">
                                     {evt.isJoint ? (
-                                      <div className="flex items-center gap-1.5 self-start mb-0.5">
-                                        <span className="text-white font-bold text-xs px-2 py-0.5 rounded shadow-sm bg-gradient-to-r from-orange-500 to-red-500 animate-pulse">接头分卷</span>
+                                      <div className="flex flex-col gap-1.5 self-start mb-0.5">
+                                        <div className="flex items-center gap-1.5 self-start">
+                                          <span className="text-white font-bold text-xs px-2 py-0.5 rounded shadow-sm bg-gradient-to-r from-orange-500 to-red-500 animate-pulse">接头分卷</span>
+                                        </div>
+                                        {evt.frontStartTime && (
+                                          <div className="text-[10px] text-orange-600 font-bold bg-orange-100/80 px-1.5 py-0.5 rounded shadow-sm self-start whitespace-nowrap">
+                                            {format(evt.frontStartTime, "HH:mm")} 接箔
+                                          </div>
+                                        )}
                                       </div>
                                     ) : (
                                       <span className="text-blue-700 font-bold text-xs px-1.5 py-0.5 rounded bg-blue-50 self-start mb-0.5">分卷</span>
@@ -2628,6 +2666,44 @@ export default function App() {
                               </div>
                             </div>
                           )}
+
+                          {/* Add Future queued roll */}
+                          <div className="col-span-2 mb-1 p-3 bg-slate-800/40 border border-slate-700/50 border-dashed rounded-lg">
+                            <div className="text-[10px] font-bold text-slate-400 uppercase mb-2">
+                              添加后续腐蚀箔
+                            </div>
+                            <div className="flex gap-2 relative">
+                              <input
+                                type="text"
+                                placeholder="批号 (如66767p)"
+                                value={forecastBatches[selectedLine] || ""}
+                                onChange={(e) =>
+                                  setForecastBatches(p => ({...p, [selectedLine]: e.target.value}))
+                                }
+                                className="w-[40%] bg-slate-900 border border-slate-700/60 rounded-lg px-2 py-1.5 text-xs text-white"
+                              />
+                              <input
+                                type="number"
+                                placeholder="长度(m)"
+                                value={forecastLengths[selectedLine] || ""}
+                                onChange={(e) =>
+                                  setForecastLengths(p => ({...p, [selectedLine]: e.target.value}))
+                                }
+                                className="w-[30%] bg-slate-900 border border-slate-700/60 rounded-lg px-2 py-1.5 text-xs text-white font-mono"
+                              />
+                              <button
+                                onClick={() => {
+                                  handleAddFutureRoll(selectedLine as LineId);
+                                  setForecastBatches(p => ({...p, [selectedLine]: ""}));
+                                  setForecastLengths(p => ({...p, [selectedLine]: ""}));
+                                }}
+                                disabled={!forecastBatches[selectedLine] || !forecastLengths[selectedLine]}
+                                className="w-[30%] bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:hover:bg-blue-600 text-white rounded-lg py-1.5 text-xs font-bold font-mono tracking-wider transition-colors flex justify-center items-center gap-1"
+                              >
+                                <Plus size={12} /> 加入
+                              </button>
+                            </div>
+                          </div>
 
                           {/* Completed Rolls Foldable Area */}
                           <div className="col-span-2 select-none">
@@ -2895,27 +2971,24 @@ export default function App() {
 
                         <div className="flex gap-2">
                           <button
-                            onClick={handleGlobalGeneratePlan}
-                            className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-black text-[13px] rounded-xl transition-all shadow-lg active:scale-95 flex justify-center items-center gap-2"
-                          >
-                            <Route size={16} /> 联机全局优化排产
-                          </button>
-                          <button
-                            onClick={handleSavePlan}
+                            onClick={() => {
+                              handleGlobalGeneratePlan();
+                              handleSavePlan();
+                            }}
                             className={cn(
                               "flex-1 py-3 text-white font-black text-[13px] rounded-xl transition-all shadow-lg flex justify-center items-center gap-2",
                               saveSuccess
                                 ? "bg-emerald-500"
-                                : "bg-emerald-600 hover:bg-emerald-500 active:scale-95",
+                                : "bg-indigo-600 hover:bg-indigo-500 active:scale-95"
                             )}
                           >
                             {saveSuccess ? (
                               <>
-                                <CheckSquare size={16} /> 已保存当前规划
+                                <CheckSquare size={16} /> 已保存排产
                               </>
                             ) : (
                               <>
-                                <CheckSquare size={16} /> 保存当前规划方案
+                                <Route size={16} /> 排产
                               </>
                             )}
                           </button>
@@ -3125,36 +3198,22 @@ export default function App() {
                   {activeTab === "forecast" && (
                     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
                       <div className="bg-slate-800/80 p-5 rounded-2xl border border-slate-700">
-                        <div className="mb-4">
-                          <h4 className="text-sm font-bold text-slate-200 flex items-center gap-2">
-                            长远预测 (腐蚀箔)
-                          </h4>
-                          <p className="text-[10px] text-slate-400 mt-1">
-                            录入未来几天需要使用的腐蚀箔，系统根据当前车速计算用完及出接头的时间。
-                          </p>
+                        <div className="flex justify-end mb-4">
+                          <label className="flex items-center gap-2 text-xs font-bold text-slate-300 cursor-pointer hover:text-white transition-colors">
+                            <input
+                              type="checkbox"
+                              checked={showOnlyJointPrep}
+                              onChange={(e) => setShowOnlyJointPrep(e.target.checked)}
+                              className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                            />
+                            只看接头前处理
+                          </label>
                         </div>
-
-                        <div className="mb-6 bg-slate-900 border border-slate-700 rounded-lg p-4">
-                          <div className="flex flex-col gap-2">
-                            <label className="text-[10px] font-bold text-slate-400 uppercase">
-                              工艺段总长(m)
-                            </label>
-                            <div className="flex items-center gap-2 border-b border-dashed border-slate-600 pb-2">
-                              <span className="text-xs text-slate-500">
-                                固定机器总长 (用于计算接头走出机器时间)：
-                              </span>
-                              <span className="text-blue-200 text-xs font-mono font-bold">
-                                240
-                              </span>
-                              <span className="text-xs text-slate-500">m</span>
-                            </div>
-                          </div>
-                        </div>
-
                         {/* Forecast Timeline */}
-                        <div className="space-y-4">
+                        <div className="space-y-12">
                           {(() => {
-                            const conf = lineConfigs[selectedLine];
+                            const lineId = selectedLine;
+                            const conf = lineConfigs[lineId];
                             const currentRem = Math.max(
                               0,
                               conf.cTotal - conf.cUsed,
@@ -3206,9 +3265,16 @@ export default function App() {
                               accMins = rOutMins;
                             }
 
+                            const fb = forecastBatches[lineId] || "";
+                            const fl = forecastLengths[lineId] || "";
+
                             return (
-                              <div className="flex flex-col gap-3 relative">
-                                <div className="absolute left-[3px] top-4 bottom-4 w-[2px] bg-slate-700/50"></div>
+                              <div key={lineId} className="flex flex-col gap-3 relative">
+                                <h4 className="text-lg font-black text-white border-b border-slate-700/50 pb-3 mb-2 flex items-center gap-2">
+                                  <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
+                                  {lineId}# 生产线预测
+                                </h4>
+                                <div className="absolute left-[3px] top-12 bottom-4 w-[2px] bg-slate-700/50"></div>
 
                                 {/* Currently running */}
                                 <div className="relative pl-6">
@@ -3222,7 +3288,7 @@ export default function App() {
                                         剩余 {currentRem}m
                                       </div>
                                     </div>
-                                    <div className="grid grid-cols-2 gap-2 mt-3">
+                                    <div className={`grid gap-2 mt-3 ${showOnlyJointPrep ? 'grid-cols-1' : 'grid-cols-2'}`}>
                                       <div className="bg-slate-900/50 rounded-lg p-2 border border-slate-700/50 text-center">
                                         <div className="text-[9px] text-slate-400 mb-1 leading-tight">
                                           本卷用完 (接头前处理)
@@ -3234,17 +3300,19 @@ export default function App() {
                                           )}
                                         </div>
                                       </div>
-                                      <div className="bg-slate-900/50 rounded-lg p-2 border border-slate-700/50 text-center">
-                                        <div className="text-[9px] text-slate-400 mb-1 leading-tight">
-                                          接头出尾 (下线分卷)
+                                      {!showOnlyJointPrep && (
+                                        <div className="bg-slate-900/50 rounded-lg p-2 border border-slate-700/50 text-center">
+                                          <div className="text-[9px] text-slate-400 mb-1 leading-tight">
+                                            接头出尾 (下线分卷)
+                                          </div>
+                                          <div className="text-[12px] font-mono text-emerald-400 font-bold">
+                                            {format(
+                                              currentEmergeDate,
+                                              "MM/dd HH:mm",
+                                            )}
+                                          </div>
                                         </div>
-                                        <div className="text-[12px] font-mono text-emerald-400 font-bold">
-                                          {format(
-                                            currentEmergeDate,
-                                            "MM/dd HH:mm",
-                                          )}
-                                        </div>
-                                      </div>
+                                      )}
                                     </div>
                                   </div>
                                 </div>
@@ -3280,7 +3348,7 @@ export default function App() {
                                       </div>
 
                                       <div className="mt-3 flex flex-col gap-2">
-                                        <div className="grid grid-cols-2 gap-2 opacity-90 group-hover:opacity-100 transition-opacity">
+                                        <div className={`grid gap-2 opacity-90 group-hover:opacity-100 transition-opacity ${showOnlyJointPrep ? 'grid-cols-1' : 'grid-cols-2'}`}>
                                           <div className="bg-blue-500/5 rounded-lg p-2 border border-blue-500/20 text-center relative overflow-hidden">
                                             <div className="absolute top-0 left-0 bottom-0 w-1 bg-blue-500/50"></div>
                                             <div className="text-[9px] text-blue-300/80 mb-1 leading-tight">
@@ -3293,20 +3361,22 @@ export default function App() {
                                               )}
                                             </div>
                                           </div>
-                                          <div className="bg-blue-500/5 rounded-lg p-2 border border-blue-500/20 text-center relative overflow-hidden">
-                                            <div className="absolute top-0 left-0 bottom-0 w-1 bg-blue-500/50"></div>
-                                            <div className="text-[9px] text-blue-300/80 mb-1 leading-tight">
-                                              始端：接头出机器
+                                          {!showOnlyJointPrep && (
+                                            <div className="bg-blue-500/5 rounded-lg p-2 border border-blue-500/20 text-center relative overflow-hidden">
+                                              <div className="absolute top-0 left-0 bottom-0 w-1 bg-blue-500/50"></div>
+                                              <div className="text-[9px] text-blue-300/80 mb-1 leading-tight">
+                                                始端：接头出机器
+                                              </div>
+                                              <div className="text-[12px] font-mono text-blue-300 font-bold group-hover:text-blue-200">
+                                                {format(
+                                                  r.startOutTime,
+                                                  "MM/dd HH:mm",
+                                                )}
+                                              </div>
                                             </div>
-                                            <div className="text-[12px] font-mono text-blue-300 font-bold group-hover:text-blue-200">
-                                              {format(
-                                                r.startOutTime,
-                                                "MM/dd HH:mm",
-                                              )}
-                                            </div>
-                                          </div>
+                                          )}
                                         </div>
-                                        <div className="grid grid-cols-2 gap-2 opacity-90 group-hover:opacity-100 transition-opacity">
+                                        <div className={`grid gap-2 opacity-90 group-hover:opacity-100 transition-opacity ${showOnlyJointPrep ? 'grid-cols-1' : 'grid-cols-2'}`}>
                                           <div className="bg-slate-900/50 rounded-lg p-2 border border-slate-700/30 text-center">
                                             <div className="text-[9px] text-slate-400 mb-1 leading-tight">
                                               末端：本卷用完前处理
@@ -3318,155 +3388,24 @@ export default function App() {
                                               )}
                                             </div>
                                           </div>
-                                          <div className="bg-slate-900/50 rounded-lg p-2 border border-slate-700/30 text-center">
-                                            <div className="text-[9px] text-slate-400 mb-1 leading-tight">
-                                              末端：接头出机器
+                                          {!showOnlyJointPrep && (
+                                            <div className="bg-slate-900/50 rounded-lg p-2 border border-slate-700/30 text-center">
+                                              <div className="text-[9px] text-slate-400 mb-1 leading-tight">
+                                                末端：接头出机器
+                                              </div>
+                                              <div className="text-[12px] font-mono text-emerald-400/80 font-bold group-hover:text-emerald-400">
+                                                {format(
+                                                  r.endOutTime,
+                                                  "MM/dd HH:mm",
+                                                )}
+                                              </div>
                                             </div>
-                                            <div className="text-[12px] font-mono text-emerald-400/80 font-bold group-hover:text-emerald-400">
-                                              {format(
-                                                r.endOutTime,
-                                                "MM/dd HH:mm",
-                                              )}
-                                            </div>
-                                          </div>
+                                          )}
                                         </div>
                                       </div>
                                     </div>
                                   </div>
                                 ))}
-
-                                {/* Preview Typed Roll */}
-                                {forecastBatch &&
-                                  forecastLength &&
-                                  !isNaN(Number(forecastLength)) &&
-                                  Number(forecastLength) > 0 && (
-                                    <div className="relative pl-6 group opacity-70">
-                                      <div className="absolute left-0 top-2 w-[8px] h-[8px] rounded-full bg-slate-700 border border-slate-500 border-dashed"></div>
-                                      <div className="bg-slate-800/50 border border-slate-700/50 border-dashed rounded-xl p-3 shrink-0">
-                                        <div className="flex justify-between items-start mb-2">
-                                          <div className="flex items-center gap-2">
-                                            <span className="text-[10px] text-slate-500 font-bold">
-                                              #预测
-                                            </span>
-                                            <div className="font-bold text-slate-400 text-xs italic">
-                                              {forecastBatch}
-                                            </div>
-                                          </div>
-                                          <div className="text-[10px] text-slate-400 font-mono">
-                                            {forecastLength}m
-                                          </div>
-                                        </div>
-                                        <div className="mt-3 flex flex-col gap-2">
-                                          <div className="grid grid-cols-2 gap-2">
-                                            <div className="bg-slate-900/50 rounded-lg p-2 border border-slate-700/30 border-dashed text-center">
-                                              <div className="text-[9px] text-slate-500 mb-1 leading-tight">
-                                                始端：初上接头箔
-                                              </div>
-                                              <div className="text-[12px] font-mono text-blue-500/60 font-bold">
-                                                {format(
-                                                  addMinutes(
-                                                    currentTime,
-                                                    accMins,
-                                                  ),
-                                                  "MM/dd HH:mm",
-                                                )}
-                                              </div>
-                                            </div>
-                                            <div className="bg-slate-900/50 rounded-lg p-2 border border-slate-700/30 border-dashed text-center">
-                                              <div className="text-[9px] text-slate-500 mb-1 leading-tight">
-                                                始端：接头出机器
-                                              </div>
-                                              <div className="text-[12px] font-mono text-blue-500/60 font-bold">
-                                                {format(
-                                                  addMinutes(
-                                                    currentTime,
-                                                    accMins +
-                                                      machineLen / conf.speed,
-                                                  ),
-                                                  "MM/dd HH:mm",
-                                                )}
-                                              </div>
-                                            </div>
-                                          </div>
-                                          <div className="grid grid-cols-2 gap-2">
-                                            <div className="bg-slate-900/50 rounded-lg p-2 border border-slate-700/30 border-dashed text-center">
-                                              <div className="text-[9px] text-slate-500 mb-1 leading-tight">
-                                                末端：本卷用完前处理
-                                              </div>
-                                              <div className="text-[12px] font-mono text-orange-500/60 font-bold">
-                                                {format(
-                                                  addMinutes(
-                                                    currentTime,
-                                                    accMins +
-                                                      Number(forecastLength) /
-                                                        conf.speed,
-                                                  ),
-                                                  "MM/dd HH:mm",
-                                                )}
-                                              </div>
-                                            </div>
-                                            <div className="bg-slate-900/50 rounded-lg p-2 border border-slate-700/30 border-dashed text-center">
-                                              <div className="text-[9px] text-slate-500 mb-1 leading-tight">
-                                                末端：接头出机器
-                                              </div>
-                                              <div className="text-[12px] font-mono text-emerald-500/60 font-bold">
-                                                {format(
-                                                  addMinutes(
-                                                    currentTime,
-                                                    accMins +
-                                                      Number(forecastLength) /
-                                                        conf.speed +
-                                                      machineLen / conf.speed,
-                                                  ),
-                                                  "MM/dd HH:mm",
-                                                )}
-                                              </div>
-                                            </div>
-                                          </div>
-                                        </div>
-                                      </div>
-                                    </div>
-                                  )}
-
-                                {/* Add new */}
-                                <div className="relative pl-6 pt-2">
-                                  <div className="bg-slate-900/80 border border-dashed border-slate-700 rounded-xl p-3">
-                                    <div className="text-[10px] text-slate-400 font-bold mb-3">
-                                      添加后续腐蚀箔
-                                    </div>
-                                    <div className="flex flex-col gap-3">
-                                      <div className="flex gap-2">
-                                        <input
-                                          type="text"
-                                          placeholder="批号 (如66767p)"
-                                          value={forecastBatch}
-                                          onChange={(e) =>
-                                            setForecastBatch(e.target.value)
-                                          }
-                                          className="w-1/2 bg-slate-800 border border-slate-700 rounded p-2 text-xs text-white"
-                                        />
-                                        <input
-                                          type="number"
-                                          placeholder="长度(m)"
-                                          value={forecastLength}
-                                          onChange={(e) =>
-                                            setForecastLength(e.target.value)
-                                          }
-                                          className="w-1/2 bg-slate-800 border border-slate-700 rounded p-2 text-xs text-white font-mono"
-                                        />
-                                      </div>
-                                      <button
-                                        onClick={handleAddFutureRoll}
-                                        disabled={
-                                          !forecastBatch || !forecastLength
-                                        }
-                                        className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:hover:bg-blue-600 text-white rounded py-2 text-xs font-bold font-mono tracking-wider transition-colors flex justify-center items-center gap-2"
-                                      >
-                                        <Plus size={14} /> 加入预测队列
-                                      </button>
-                                    </div>
-                                  </div>
-                                </div>
                               </div>
                             );
                           })()}
@@ -3667,6 +3606,7 @@ export default function App() {
                   setLineConfigs((prev) => ({ ...prev, [id]: c }))
                 }
                 currentTime={currentTime}
+                isPlanningMode={isPlanningMode}
                 rollCompletionInputs={rollCompletionInputs}
                 setRollCompletionInputs={setRollCompletionInputs}
                 rollCompletionTimeInputs={rollCompletionTimeInputs}
