@@ -144,45 +144,33 @@ function TimelineRoll({
       </div>
 
       {/* Separator / Drag Handle */}
-      <div
-        onMouseDown={handleMouseDown}
-        className="absolute right-0 top-0 bottom-0 w-2 translate-x-1/2 cursor-ew-resize hover:bg-blue-500/50 z-20 flex items-center justify-center group-hover:opacity-100 opacity-50"
-      >
-        <div className="w-[1px] h-3 bg-slate-800" />
-      </div>
+      {leftPct + wPct <= 100 && (
+        <div
+          onMouseDown={handleMouseDown}
+          className="absolute right-0 top-0 bottom-0 w-2 translate-x-1/2 cursor-ew-resize hover:bg-blue-500/50 z-20 flex items-center justify-center group-hover:opacity-100 opacity-50"
+        >
+          <div className="w-[1px] h-3 bg-slate-800" />
+        </div>
+      )}
 
       {/* Markers */}
-      <div className="absolute right-0 bottom-full mb-0.5 whitespace-nowrap pointer-events-none flex flex-col items-end z-30">
-        {r.isJoint ? (
-          <div className="translate-x-1/2 flex flex-col items-center">
-            <div className="text-[8px] font-black text-orange-600 bg-orange-100 border border-orange-200 px-1 rounded transform scale-75 origin-bottom">
-              接箔
+      {leftPct + wPct <= 100 && (
+        <div className="absolute right-0 bottom-full mb-0.5 whitespace-nowrap pointer-events-none flex flex-col items-end z-30">
+          {r.isJoint ? (
+            <div className="translate-x-1/2 flex flex-col items-center">
+              <div className="text-[8px] font-black text-orange-600 bg-orange-100 border border-orange-200 px-1 rounded transform scale-75 origin-bottom whitespace-nowrap">
+                末端接头必分卷
+              </div>
+              <div className="w-[1px] h-1 bg-orange-500"></div>
             </div>
-            <div className="w-[1px] h-1 bg-orange-500"></div>
-          </div>
-        ) : (
-          <div className="translate-x-1/2 flex flex-col items-center">
-            <div className="text-[8px] font-bold text-blue-600 transform scale-75 origin-bottom">
-              分卷
+          ) : (
+            <div className="translate-x-1/2 flex flex-col items-center">
+              <div className="text-[8px] font-bold text-blue-600 transform scale-75 origin-bottom">
+                分卷
+              </div>
+              <div className="w-[1px] h-1 bg-blue-400"></div>
             </div>
-            <div className="w-[1px] h-1 bg-blue-400"></div>
-          </div>
-        )}
-      </div>
-
-      {/* Special Unroll (特殊分卷) Marker */}
-      {r.isJoint && wPct > 0 && (
-        <div
-          className="absolute bottom-[-18px] z-30 pointer-events-none flex flex-col items-center"
-          style={{
-            left: `calc(100% + ${(emergeWHeight / wPct) * 100}%)`,
-            transform: "translateX(-50%)",
-          }}
-        >
-          <div className="w-[1px] h-1 bg-violet-400"></div>
-          <div className="text-[8px] font-bold text-violet-600 bg-violet-100 border border-violet-200 px-1 rounded transform scale-75 origin-top mt-0.5 whitespace-nowrap">
-            特殊分卷
-          </div>
+          )}
         </div>
       )}
     </div>
@@ -331,6 +319,7 @@ interface CompletedRoll {
   corrosionBatchNo?: string;
   length: number;
   unrollTime: string;
+  isManual?: boolean;
 }
 
 interface LinePlanConfig {
@@ -463,7 +452,10 @@ function CombinedPlanTimeline({
 
           {lines.map((lineId) => {
             const config = lineConfigs[lineId];
-            const totalToForm = config.fProduced + config.cTotal - config.cUsed;
+            let totalToForm = config.fProduced + config.cTotal - config.cUsed;
+            if (config.futureRolls) {
+              totalToForm += config.futureRolls.reduce((a, r) => a + r.length, 0);
+            }
             const minL = lineId === "25" ? 300 : 400;
             const maxL = lineId === "25" ? 800 : 550;
 
@@ -596,8 +588,13 @@ function CombinedPlanTimeline({
                                  className={cn("transition-colors py-3 px-4 rounded-xl border shadow-sm relative", roll.isCompleted ? "bg-slate-50 border-slate-300 opacity-80" : "bg-white hover:bg-slate-50 border-slate-200")}
                                >
                                   <div className="flex justify-between items-center mb-1">
-                                    <span className="font-bold text-slate-700 bg-slate-100 flex items-center rounded text-xs border border-slate-200 overflow-hidden shadow-sm">
-                                      <span className="px-2 py-1 bg-slate-200/50">{roll.isCompleted ? "✅ 已卸卷" : `卷 #${roll.index + 1}`}</span>
+                                    <span className="font-bold text-slate-700 bg-slate-100 flex flex-wrap items-center rounded text-xs border border-slate-200 overflow-hidden shadow-sm">
+                                      <span className="px-2 py-1 bg-slate-200/50 flex items-center gap-1.5">
+                                        <span>{roll.isCompleted ? "✅ 已卸卷" : `卷 #${roll.index + 1}`}</span>
+                                        {roll.isJoint && !roll.isCompleted && (
+                                          <span className="bg-orange-500 text-white text-[9px] px-1.5 py-0.5 rounded-sm whitespace-nowrap shadow-sm">末端接头必分卷</span>
+                                        )}
+                                      </span>
                                       <input
                                         type="text"
                                         placeholder="化成箔批号"
@@ -711,6 +708,7 @@ function CombinedPlanTimeline({
 function FoilProgressBar({
   total,
   cPrev,
+  cPrevUnrolled,
   cMineUnrolled,
   cMine,
   onChangePrev,
@@ -718,6 +716,7 @@ function FoilProgressBar({
 }: {
   total: number;
   cPrev: number;
+  cPrevUnrolled: number;
   cMineUnrolled: number;
   cMine: number;
   onChangePrev: (v: number) => void;
@@ -801,12 +800,12 @@ function FoilProgressBar({
         <div className="flex gap-4">
           {cPrev > 0 && (
             <span className="text-blue-100 z-20 drop-shadow-md">
-              上班已用: {cPrev}m
+              上班已用: {cPrev}m {cPrevUnrolled > 0 && cPrevUnrolled !== cPrev ? `(已卸卷: ${cPrevUnrolled}m)` : ""}
             </span>
           )}
           {cMineUnrolled > 0 && (
             <span className="text-emerald-200 z-20 drop-shadow-md">
-              已卸卷: {cMineUnrolled}m
+              本班已卸卷: {cMineUnrolled}m
             </span>
           )}
           {Math.max(0, cMine - cMineUnrolled) > 0 && (
@@ -1088,18 +1087,33 @@ function DraggableTimelineLine({
         return (
           <div
             key={roll.id}
-            className="absolute top-0 bottom-0 border-r border-white group pointer-events-none"
+            className={cn(
+              "absolute top-0 bottom-0 border-r border-white group pointer-events-none",
+              roll.isJoint && "z-20",
+            )}
             style={{
               left: `${pctLeft}%`,
               width: `${pctWidth}%`,
-              backgroundColor: `hsl(215, 80%, ${i % 2 === 0 ? "90%" : "85%"})`,
+              backgroundColor: roll.isJoint
+                ? `hsl(28, 90%, ${i % 2 === 0 ? "85%" : "80%"})` // orange color 
+                : `hsl(215, 80%, ${i % 2 === 0 ? "90%" : "85%"})`, 
             }}
           >
+            {/* Joint Marker at the end of the roll */}
+            {roll.isJoint && pctLeft + pctWidth <= 100 && (
+              <div className="absolute right-0 top-full mt-2 pointer-events-none flex flex-col items-center select-none" style={{ transform: "translateX(50%)" }}>
+                <div className="w-px h-2 bg-orange-400"></div>
+                <div className="bg-orange-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap">
+                  末端接头必分卷
+                </div>
+              </div>
+            )}
+            
             {pctLeft + pctWidth > 0 && pctLeft < 100 && (
               <div 
                 className={cn(
                   "absolute flex flex-col items-center pointer-events-auto cursor-pointer active:opacity-60 hover:opacity-80 transition-opacity",
-                  isPoppedOut ? "bottom-full mb-2 z-40 overflow-visible whitespace-nowrap bg-blue-50 px-2 py-1 rounded-md shadow-md border border-blue-400" : "top-0 bottom-0 justify-center overflow-hidden px-1 whitespace-nowrap"
+                  isPoppedOut ? (roll.isJoint ? "bottom-full mb-2 z-40 overflow-visible whitespace-nowrap bg-orange-50 px-2 py-1 rounded-md shadow-md border border-orange-400" : "bottom-full mb-2 z-40 overflow-visible whitespace-nowrap bg-blue-50 px-2 py-1 rounded-md shadow-md border border-blue-400") : "top-0 bottom-0 justify-center overflow-hidden px-1 whitespace-nowrap"
                 )}
                 style={{
                   left: `${visibleCenterPct}%`,
@@ -1184,11 +1198,11 @@ function DraggableTimelineLine({
                 ) : (
                   <>
                     {isPoppedOut && (
-                      <div className="absolute top-full left-1/2 -translate-x-1/2 w-px h-2.5 bg-blue-400">
-                        <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1 w-1.5 h-1.5 rotate-45 border-b border-r border-blue-400"></div>
+                      <div className={cn("absolute top-full left-1/2 -translate-x-1/2 w-px h-2.5", roll.isJoint ? "bg-orange-400" : "bg-blue-400")}>
+                        <div className={cn("absolute top-full left-1/2 -translate-x-1/2 -mt-1 w-1.5 h-1.5 rotate-45 border-b border-r", roll.isJoint ? "border-orange-400" : "border-blue-400")}></div>
                       </div>
                     )}
-                    <span className={cn("font-black text-blue-900/80 truncate", isPoppedOut ? "text-xs" : "text-[10px]")}>
+                    <span className={cn("font-black truncate", isPoppedOut ? "text-xs" : "text-[10px]", roll.isJoint ? "text-orange-900/80" : "text-blue-900/80")}>
                       {roll.targetFormedLength.toFixed(1)}m
                     </span>
                     
@@ -1717,7 +1731,7 @@ export default function App() {
   ) => {
     const conf = currentLineConfigs[lineId];
     let L = conf.cTotal - conf.cUsed;
-    if (L <= 0) return currentLineConfigs;
+    if (L <= 0 && (!conf.futureRolls || conf.futureRolls.length === 0)) return currentLineConfigs;
     const avg = lineId === "25" ? 550 : 475;
     const minL = lineId === "25" ? 300 : 400;
     const maxL = lineId === "25" ? 800 : 550;
@@ -1747,133 +1761,155 @@ export default function App() {
       }
     });
 
-    let totalToForm = conf.fProduced + L;
+    let allNewRolls: PlannedRoll[] = [];
+    let globalAccC = 0;
 
-    const evaluate = (targets: number[]) => {
-      let p = 0;
-      let acc = 0;
-      for (let i = 0; i < targets.length; i++) {
-        const tL = targets[i];
-        // check format constraints
-        if (tL < minL) p += (minL - tL) * 200;
-        if (tL > maxL) p += (tL - maxL) * 200;
-        p += Math.abs(tL - avg);
+    const generateForFoil = (
+      foilLength: number,
+      fProducedOffset: number,
+      foilBatchNo: string,
+    ) => {
+      let totalToForm = fProducedOffset + foilLength;
 
-        let cConsum = i === 0 ? tL - conf.fProduced : tL;
-        if (i === targets.length - 1) cConsum = L - acc;
-        if (cConsum < 0) cConsum = 0;
-        acc += cConsum;
+      const evaluate = (targets: number[]) => {
+        let p = 0;
+        let accForFoil = 0;
+        for (let i = 0; i < targets.length; i++) {
+          const tL = targets[i];
+          // check format constraints
+          if (tL < minL) p += (minL - tL) * 200;
+          if (tL > maxL) p += (tL - maxL) * 200;
+          p += Math.abs(tL - avg);
 
-        const endTime = new Date(
-          currentTime.getTime() + (acc / conf.speed) * 60000,
-        );
-        const endMs = endTime.getTime();
-        const shiftEndMs = shiftEnd.getTime();
+          let cConsum = i === 0 ? tL - fProducedOffset : tL;
+          if (i === targets.length - 1) cConsum = foilLength - accForFoil;
+          if (cConsum < 0) cConsum = 0;
+          accForFoil += cConsum;
 
-        if (checkMealConflict(endTime, mealConfig)) p += 10000;
+          const endTime = new Date(
+            currentTime.getTime() +
+              ((globalAccC + accForFoil) / conf.speed) * 60000,
+          );
+          const endMs = endTime.getTime();
+          const shiftEndMs = shiftEnd.getTime();
 
-        // Penalty for unroll within 60 mins before shift end
-        if (endMs > shiftEndMs - 60 * 60000 && endMs < shiftEndMs) p += 5000;
-        // Penalty for unroll within 30 mins after shift start
-        if (endMs > shiftEndMs && endMs < shiftEndMs + 30 * 60000) p += 3000;
+          if (checkMealConflict(endTime, mealConfig)) p += 10000;
 
-        // Bundling with other lines
-        for (const ot of otherRollTimes) {
-          const diffMins = Math.abs(endMs - ot) / 60000;
-          if (diffMins > 15 && diffMins <= 45) {
-            p += (45 - diffMins) * 20; // Try to avoid medium gaps (awkward resting)
-          } else if (diffMins <= 15) {
-            p -= 500; // Reward for bundling close together
+          // Penalty for unroll within 60 mins before shift end
+          if (endMs > shiftEndMs - 60 * 60000 && endMs < shiftEndMs) p += 5000;
+          // Penalty for unroll within 30 mins after shift start
+          if (endMs > shiftEndMs && endMs < shiftEndMs + 30 * 60000) p += 3000;
+
+          // Bundling with other lines
+          for (const ot of otherRollTimes) {
+            const diffMins = Math.abs(endMs - ot) / 60000;
+            if (diffMins > 15 && diffMins <= 45) {
+              p += (45 - diffMins) * 20; // Try to avoid medium gaps (awkward resting)
+            } else if (diffMins <= 15) {
+              p -= 500; // Reward for bundling close together
+            }
           }
         }
+        return p;
+      };
+
+      let bestTargets: number[] = [];
+      let minPenalty = Infinity;
+
+      let nMin = Math.max(1, Math.ceil(totalToForm / maxL));
+      let nMax = Math.max(nMin, Math.floor(totalToForm / minL));
+
+      for (let n = nMin; n <= nMax; n++) {
+        let t1 = totalToForm / n;
+        if (n === 1) t1 = totalToForm;
+        if (t1 < fProducedOffset) t1 = fProducedOffset;
+        let targets = [t1];
+        let remain = totalToForm - t1;
+        if (n > 1) {
+          let avgRest = remain / (n - 1);
+          for (let i = 1; i < n; i++) targets.push(avgRest);
+        }
+        let p = evaluate(targets);
+        if (p < minPenalty) {
+          minPenalty = p;
+          bestTargets = targets;
+        }
       }
-      return p;
+
+      for (let iter = 0; iter < 10000; iter++) {
+        let n = nMin + Math.floor(Math.random() * (nMax - nMin + 1));
+        let remain = totalToForm;
+        let targets: number[] = [];
+        let valid = true;
+        for (let i = 0; i < n - 1; i++) {
+          let minTake = Math.max(minL, remain - (n - 1 - i) * maxL);
+          let maxTake = Math.min(maxL, remain - (n - 1 - i) * minL);
+          if (i === 0) minTake = Math.max(minTake, fProducedOffset);
+
+          if (minTake > maxTake) {
+            minTake = minL;
+            maxTake = maxL;
+          }
+          if (minTake > maxTake) {
+            valid = false;
+            break;
+          }
+          let take = minTake + Math.random() * (maxTake - minTake);
+          targets.push(take);
+          remain -= take;
+        }
+        if (!valid) continue;
+        targets.push(remain);
+
+        const p = evaluate(targets);
+        if (p < minPenalty) {
+          minPenalty = p;
+          bestTargets = targets;
+        }
+      }
+
+      if (bestTargets.length === 0) bestTargets = [totalToForm];
+
+      let foilAccumulatedC = 0;
+
+      for (let i = 0; i < bestTargets.length; i++) {
+        let targetL = bestTargets[i];
+        let cConsum = i === 0 ? targetL - fProducedOffset : targetL;
+        targetL = Number(targetL.toFixed(1));
+
+        if (i === bestTargets.length - 1) {
+          cConsum = Number((foilLength - foilAccumulatedC).toFixed(1));
+          targetL = Number(
+            (i === 0 ? fProducedOffset + cConsum : cConsum).toFixed(1),
+          );
+        }
+        foilAccumulatedC += cConsum;
+
+        allNewRolls.push({
+          id: Math.random().toString(),
+          targetFormedLength: targetL,
+          isJoint: i === bestTargets.length - 1,
+          batchNumber: foilBatchNo || "",
+        });
+      }
+      globalAccC += foilAccumulatedC;
     };
 
-    let bestTargets: number[] = [];
-    let minPenalty = Infinity;
-
-    let nMin = Math.max(1, Math.ceil(totalToForm / maxL));
-    let nMax = Math.max(nMin, Math.floor(totalToForm / minL));
-
-    for (let n = nMin; n <= nMax; n++) {
-      let t1 = totalToForm / n;
-      if (n === 1) t1 = totalToForm;
-      if (t1 < conf.fProduced) t1 = conf.fProduced;
-      let targets = [t1];
-      let remain = totalToForm - t1;
-      if (n > 1) {
-        let avgRest = remain / (n - 1);
-        for (let i = 1; i < n; i++) targets.push(avgRest);
-      }
-      let p = evaluate(targets);
-      if (p < minPenalty) {
-        minPenalty = p;
-        bestTargets = targets;
-      }
+    // 1. Current foil logic
+    if (L > 0) {
+      generateForFoil(L, conf.fProduced, conf.batchNo || "");
     }
 
-    for (let iter = 0; iter < 10000; iter++) {
-      let n = nMin + Math.floor(Math.random() * (nMax - nMin + 1));
-      let remain = totalToForm;
-      let targets: number[] = [];
-      let valid = true;
-      for (let i = 0; i < n - 1; i++) {
-        let minTake = Math.max(minL, remain - (n - 1 - i) * maxL);
-        let maxTake = Math.min(maxL, remain - (n - 1 - i) * minL);
-        if (i === 0) minTake = Math.max(minTake, conf.fProduced);
-
-        if (minTake > maxTake) {
-          minTake = minL;
-          maxTake = maxL;
-        }
-        if (minTake > maxTake) {
-          valid = false;
-          break;
-        }
-        let take = minTake + Math.random() * (maxTake - minTake);
-        targets.push(take);
-        remain -= take;
-      }
-      if (!valid) continue;
-      targets.push(remain);
-
-      const p = evaluate(targets);
-      if (p < minPenalty) {
-        minPenalty = p;
-        bestTargets = targets;
-      }
-    }
-
-    if (bestTargets.length === 0) bestTargets = [totalToForm];
-
-    let newRolls: PlannedRoll[] = [];
-    let accumulatedC = 0;
-
-    for (let i = 0; i < bestTargets.length; i++) {
-      let targetL = bestTargets[i];
-      let cConsum = i === 0 ? targetL - conf.fProduced : targetL;
-      targetL = Number(targetL.toFixed(1));
-
-      if (i === bestTargets.length - 1) {
-        cConsum = Number((L - accumulatedC).toFixed(1));
-        targetL = Number(
-          (i === 0 ? conf.fProduced + cConsum : cConsum).toFixed(1),
-        );
-      }
-      accumulatedC += cConsum;
-
-      newRolls.push({
-        id: Math.random().toString(),
-        targetFormedLength: targetL,
-        isJoint: i === bestTargets.length - 1,
-        batchNumber: conf.batchNo || "",
+    // 2. Future queued foils
+    if (conf.futureRolls) {
+      conf.futureRolls.forEach((fr) => {
+        generateForFoil(fr.length, 0, fr.batchNo);
       });
     }
 
     const nextConfigs = {
       ...currentLineConfigs,
-      [lineId]: { ...conf, rolls: newRolls },
+      [lineId]: { ...conf, rolls: allNewRolls },
     };
     setLineConfigs(nextConfigs);
     return nextConfigs;
@@ -2618,9 +2654,16 @@ export default function App() {
                             <FoilProgressBar
                               total={lineConfigs[selectedLine].cTotal}
                               cPrev={lineConfigs[selectedLine].cPrevUsed || 0}
+                              cPrevUnrolled={
+                                (() => {
+                                  const rolls = lineConfigs[selectedLine].completedRolls?.filter(cr => cr.isManual) || [];
+                                  if (rolls.length <= 1) return 0;
+                                  return rolls.slice(0, -1).reduce((acc, cr) => acc + (Number(cr.length) || 0), 0);
+                                })()
+                              }
                               cMineUnrolled={
-                                lineConfigs[selectedLine].completedRolls?.reduce(
-                                  (acc, cr) => acc + cr.length,
+                                lineConfigs[selectedLine].completedRolls?.filter(cr => !cr.isManual).reduce(
+                                  (acc, cr) => acc + (Number(cr.length) || 0),
                                   0
                                 ) || 0
                               }
@@ -2849,6 +2892,7 @@ export default function App() {
                                           batchNo: "",
                                           length: 0,
                                           unrollTime: new Date().toISOString(),
+                                          isManual: true,
                                         },
                                       ];
                                       
@@ -4012,13 +4056,44 @@ export default function App() {
                 />
               </div>
             </div>
-            <div className="flex justify-end gap-3">
+            <div className="flex justify-end gap-3 flex-wrap">
               <button
                 onClick={() => setAddFoilDialog(false)}
                 className="px-4 py-2 rounded-lg text-sm font-semibold text-slate-300 hover:bg-slate-800 transition-colors"
                 type="button"
               >
                 取消
+              </button>
+              <button
+                onClick={() => {
+                  if (addFoilLength) {
+                    setLineConfigs((p) => {
+                      const conf = p[selectedLine];
+                      const frs = conf.futureRolls || [];
+                      return {
+                        ...p,
+                        [selectedLine]: {
+                          ...conf,
+                          futureRolls: [
+                            ...frs,
+                            {
+                              id: Math.random().toString(),
+                              batchNo: addFoilBatch,
+                              length: Number(addFoilLength),
+                            },
+                          ],
+                        },
+                      };
+                    });
+                    setAddFoilBatch("");
+                    setAddFoilLength("");
+                  }
+                }}
+                disabled={!addFoilLength}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 border border-emerald-500/30 transition-colors shadow-sm"
+                type="button"
+              >
+                保存并继续录入
               </button>
               <button
                 onClick={() => {
@@ -4048,7 +4123,7 @@ export default function App() {
                 className="px-4 py-2 rounded-lg text-sm font-semibold bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white transition-colors shadow-sm"
                 type="button"
               >
-                确定加入规划
+                加入规划并关闭
               </button>
             </div>
           </div>
