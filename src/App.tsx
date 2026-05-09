@@ -2324,7 +2324,7 @@ export default function App() {
                         id: string;
                         time: Date;
                         lineId: LineId;
-                        type: 'completed' | 'plan';
+                        type: 'completed' | 'plan' | 'joint_prep';
                         length: number;
                         isJoint?: boolean;
                         frontStartTime?: Date;
@@ -2353,11 +2353,12 @@ export default function App() {
 
                         mappedRolls.forEach(r => {
                           const t = r.endTime;
+                          let frontStartTime: Date | undefined;
+                          if (r.isJoint) {
+                            frontStartTime = new Date(t.getTime() - (240 / lineConfigs[lineId].speed) * 60000);
+                          }
+
                           if (t.getTime() >= shiftS.getTime() && t.getTime() <= shiftE.getTime()) {
-                            let frontStartTime: Date | undefined;
-                            if (r.isJoint) {
-                              frontStartTime = new Date(t.getTime() - (240 / lineConfigs[lineId].speed) * 60000);
-                            }
                             allEvents.push({
                               id: `p-${lineId}-${r.id}`,
                               time: t,
@@ -2366,6 +2367,17 @@ export default function App() {
                               length: r.targetFormedLength,
                               isJoint: r.isJoint,
                               frontStartTime
+                            });
+                          }
+
+                          if (frontStartTime && frontStartTime.getTime() >= shiftS.getTime() && frontStartTime.getTime() <= shiftE.getTime()) {
+                            allEvents.push({
+                              id: `jp-${lineId}-${r.id}-front`,
+                              time: frontStartTime,
+                              lineId,
+                              type: 'joint_prep',
+                              length: 0,
+                              isJoint: true,
                             });
                           }
                         });
@@ -2392,7 +2404,9 @@ export default function App() {
                               <div className={cn(
                                 "w-3 h-3 rounded-full mt-3 border-[3px] shadow-sm transform group-hover:scale-125 transition-transform",
                                 evt.type === 'completed' ? "bg-emerald-500 border-emerald-100" : (
-                                  evt.isJoint ? "bg-orange-500 border-orange-100" : "bg-blue-500 border-blue-100"
+                                  evt.type === 'joint_prep' ? "bg-orange-500 border-orange-100" : (
+                                    evt.isJoint ? "bg-orange-500 border-orange-100" : "bg-blue-500 border-blue-100"
+                                  )
                                 )
                               )}></div>
                             </div>
@@ -2409,6 +2423,18 @@ export default function App() {
                                   </div>
                                   <div className="text-right flex flex-col">
                                     <span className="text-slate-700 font-black text-base">{evt.length.toFixed(1)}<span className="text-xs text-slate-400 ml-0.5">m</span></span>
+                                  </div>
+                                </div>
+                              ) : evt.type === 'joint_prep' ? (
+                                <div className="flex items-center bg-orange-50/80 border border-orange-200 rounded-xl px-4 py-3 gap-3 shadow-sm hover:shadow transition-shadow">
+                                  <div className="w-8 h-8 rounded-lg bg-orange-100 flex items-center justify-center font-black text-orange-700">
+                                    {evt.lineId}#
+                                  </div>
+                                  <div className="flex-1 flex flex-col">
+                                    <span className="text-orange-600 font-bold text-[13px] self-start flex items-center gap-1.5">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse"></span>
+                                      接箔 (接头前处理)
+                                    </span>
                                   </div>
                                 </div>
                               ) : (
