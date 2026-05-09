@@ -79,17 +79,12 @@ function TimelineRoll({
     const startX = e.clientX;
     const startLength = r.targetFormedLength;
 
-    // Estimate speed: time = length / speed. pixel width = 12h = 720 mins.
-    // So 1 pixel = (720 / containerWidth) mins = (720 / containerWidth) * speed meters.
-
     const container = containerRef.current?.parentElement?.parentElement;
     if (!container) return;
     const containerWidth = container.clientWidth;
 
     const handleMouseMove = (e2: MouseEvent) => {
       const dx = e2.clientX - startX;
-      // widthPct change = (dx / containerWidth) * 100
-      // 100% width = 12 hours = 720 mins
       const minsChange = (dx / containerWidth) * 720;
       const lengthChange = minsChange * (r.speed || 1.3);
 
@@ -105,15 +100,11 @@ function TimelineRoll({
     document.addEventListener("mouseup", handleMouseUp);
   };
 
-  const machineLen = 240; // constant speed fixed machine length
-  const emergeDelayMins = machineLen / (r.speed || 1.3);
-  const emergeWHeight = (emergeDelayMins / 720) * 100;
-
   return (
     <div
       ref={containerRef}
       className={cn(
-        "absolute top-[1px] bottom-[1px] rounded-sm group overflow-visible z-10",
+        "absolute top-[1px] bottom-[1px] overflow-visible z-10",
         r.isJoint ? "z-20" : "",
       )}
       style={{
@@ -121,54 +112,36 @@ function TimelineRoll({
         width: `${Math.min(100 - Math.max(0, leftPct), wPct - (leftPct < 0 ? -leftPct : 0))}%`,
       }}
     >
-      {/* Background */}
-      <div
-        className={cn(
-          "absolute inset-0 shadow-sm border-r border-slate-400 overflow-hidden",
-          r.isJoint
-            ? "bg-orange-500/80 border-orange-700 border-l border-l-orange-700"
-            : "bg-blue-500/20 border-blue-500 border-l border-l-blue-500",
-        )}
-      />
-
-      {/* Labeling on Hover */}
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none select-none z-30 whitespace-nowrap flex flex-col items-center gap-0.5">
-        <span className="text-[9px] font-bold px-1 bg-white border border-slate-200 rounded shadow-sm">
-          {r.targetFormedLength}m
-        </span>
-        {(r.formedBatchNo || r.batchNumber) && (
-          <span className="text-[8px] px-1 bg-blue-50 text-blue-700 border border-blue-200 rounded shadow-sm font-mono">
-            {r.formedBatchNo || r.batchNumber}
-          </span>
-        )}
-      </div>
-
       {/* Separator / Drag Handle */}
       {leftPct + wPct <= 100 && (
         <div
           onMouseDown={handleMouseDown}
-          className="absolute right-0 top-0 bottom-0 w-2 translate-x-1/2 cursor-ew-resize hover:bg-blue-500/50 z-20 flex items-center justify-center group-hover:opacity-100 opacity-50"
+          className="absolute right-0 top-0 bottom-0 w-2 translate-x-1/2 cursor-ew-resize hover:bg-blue-500/50 z-20 flex items-center justify-center"
         >
-          <div className="w-[1px] h-3 bg-slate-800" />
+          <div className={cn("w-[2px] h-full", r.isJoint ? "bg-orange-500" : "bg-blue-500")} />
         </div>
       )}
 
       {/* Markers */}
       {leftPct + wPct <= 100 && (
-        <div className="absolute right-0 bottom-full mb-0.5 whitespace-nowrap pointer-events-none flex flex-col items-end z-30">
+        <div className="absolute right-0 bottom-full mb-0.5 whitespace-nowrap pointer-events-none flex flex-col items-center z-30 translate-x-1/2">
           {r.isJoint ? (
-            <div className="translate-x-1/2 flex flex-col items-center">
-              <div className="text-[8px] font-black text-orange-600 bg-orange-100 border border-orange-200 px-1 rounded transform scale-75 origin-bottom whitespace-nowrap">
-                末端接头必分卷
+            <div className="flex flex-col items-center">
+              <div className="text-[10px] font-black text-orange-700 bg-orange-100 border border-orange-300 px-1.5 py-0.5 rounded shadow-sm mb-0.5 flex flex-col items-center leading-tight outline outline-2 outline-white">
+                <span className="font-mono text-[9px] mb-0.5">{r.endTime.toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute:'2-digit'})}</span>
+                <span className="opacity-90">{r.targetFormedLength.toFixed(1)}m</span>
               </div>
-              <div className="w-[1px] h-1 bg-orange-500"></div>
+              <div className="text-[8.5px] font-bold text-orange-600 bg-white px-1 -mb-0.5 rounded relative z-10 border border-orange-200">末端接头必分卷</div>
+              <div className="w-[1.5px] h-2 bg-orange-500"></div>
             </div>
           ) : (
-            <div className="translate-x-1/2 flex flex-col items-center">
-              <div className="text-[8px] font-bold text-blue-600 transform scale-75 origin-bottom">
-                分卷
+            <div className="flex flex-col items-center">
+              <div className="text-[10px] font-bold text-blue-700 bg-blue-50 border border-blue-300 px-1.5 py-0.5 rounded shadow-sm mb-0.5 flex flex-col items-center leading-tight outline outline-2 outline-white">
+                <span className="font-mono text-[9px] mb-0.5">{r.endTime.toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute:'2-digit'})}</span>
+                <span className="opacity-90">{r.targetFormedLength.toFixed(1)}m</span>
               </div>
-              <div className="w-[1px] h-1 bg-blue-400"></div>
+              <div className="text-[8.5px] font-bold text-blue-500 bg-white px-1 -mb-0.5 rounded relative z-10 border border-blue-200">分卷</div>
+              <div className="w-[1.5px] h-2 bg-blue-500"></div>
             </div>
           )}
         </div>
@@ -947,6 +920,7 @@ function DraggableTimelineLine({
   const barRef = useRef<HTMLDivElement>(null);
   const [draggingIdx, setDraggingIdx] = useState<number | null>(null);
   const [editingRollIdx, setEditingRollIdx] = useState<number | null>(null);
+  const [deleteConfirmIdx, setDeleteConfirmIdx] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
 
   const currMinutesFromStart = differenceInMinutes(currentTime, shiftStart);
@@ -1024,6 +998,8 @@ function DraggableTimelineLine({
     <div
       ref={barRef}
       className="absolute inset-0 z-10 select-none rounded"
+      style={{ touchAction: "pan-y" }}
+      onClick={() => { setEditingRollIdx(null); setDeleteConfirmIdx(null); }}
     >
       {/* Render completed rolls first */}
       {config.completedRolls?.map((cr: any, i: number) => {
@@ -1113,88 +1089,186 @@ function DraggableTimelineLine({
               <div 
                 className={cn(
                   "absolute flex flex-col items-center pointer-events-auto cursor-pointer active:opacity-60 hover:opacity-80 transition-opacity",
-                  isPoppedOut ? (roll.isJoint ? "bottom-full mb-2 z-40 overflow-visible whitespace-nowrap bg-orange-50 px-2 py-1 rounded-md shadow-md border border-orange-400" : "bottom-full mb-2 z-40 overflow-visible whitespace-nowrap bg-blue-50 px-2 py-1 rounded-md shadow-md border border-blue-400") : "top-0 bottom-0 justify-center overflow-hidden px-1 whitespace-nowrap"
+                  isPoppedOut ? (roll.isJoint ? "bottom-full mb-2 z-40 overflow-visible whitespace-nowrap bg-orange-50 px-2 py-1 rounded-md shadow-md border border-orange-400" : "bottom-full mb-2 z-40 overflow-visible whitespace-nowrap bg-blue-50 px-2 py-1 rounded-md shadow-md border border-blue-400") : "top-0 bottom-0 justify-center px-1 whitespace-nowrap",
+                  editingRollIdx !== i && !isPoppedOut && "overflow-hidden",
+                  editingRollIdx === i && "z-50 overflow-visible"
                 )}
                 style={{
                   left: `${visibleCenterPct}%`,
-                  transform: 'translateX(-50%)'
+                  transform: 'translateX(-50%)',
+                  touchAction: "pan-y"
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
                 }}
                 onClick={(e) => {
                   e.stopPropagation();
                   setEditingRollIdx(i);
+                  setDeleteConfirmIdx(null);
                   setEditValue(roll.targetFormedLength.toFixed(1));
                 }}
               >
                 {editingRollIdx === i ? (
-                  <form onSubmit={(e) => {
-                    e.preventDefault();
-                    const el = document.activeElement as HTMLElement;
-                    if (el) el.blur();
-                  }} className="flex items-center">
-                    <input 
-                      autoFocus
-                      type="number"
-                      step="0.1"
-                      className="w-14 px-0.5 py-0 text-xs font-bold text-blue-900 border border-blue-400 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 shadow-inner -my-0.5"
-                      style={{ appearance: 'none', WebkitAppearance: 'none' }}
-                      value={editValue}
-                      onChange={(e) => setEditValue(e.target.value)}
-                      onBlur={() => {
-                        let val = parseFloat(editValue);
-                        if (!isNaN(val) && val !== roll.targetFormedLength) {
-                          let leftMin = minL;
-                          if (i === 0) leftMin = Math.max(minL, config.fProduced);
-                          
-                          let sum = 0;
-                          let otherTarget = 0;
-                          let canBorrow = false;
-                          let borrowIdx = -1;
-                          
-                          if (i < config.rolls.length - 1) {
-                            borrowIdx = i + 1;
-                            otherTarget = config.rolls[i+1].targetFormedLength;
-                            sum = roll.targetFormedLength + otherTarget;
-                            canBorrow = true;
-                          } else if (i > 0) {
-                            borrowIdx = i - 1;
-                            otherTarget = config.rolls[i-1].targetFormedLength;
-                            sum = roll.targetFormedLength + otherTarget;
-                            leftMin = minL;
-                            canBorrow = true;
+                  <div className="relative flex items-center gap-1 bg-white p-0.5 rounded shadow border border-slate-200" onClick={e => e.stopPropagation()}>
+                    <form onSubmit={(e) => {
+                      e.preventDefault();
+                      const el = document.activeElement as HTMLElement;
+                      if (el) el.blur();
+                    }} className="flex items-center">
+                      <input 
+                        autoFocus
+                        type="number"
+                        step="0.1"
+                        className="w-14 pl-1 py-1 text-xs font-bold text-blue-900 border border-blue-400 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 shadow-inner"
+                        style={{ appearance: 'none', WebkitAppearance: 'none' }}
+                        value={editValue}
+                        onChange={(e) => setEditValue(e.target.value)}
+                        onBlur={() => {
+                          let val = parseFloat(editValue);
+                          if (!isNaN(val) && val !== roll.targetFormedLength) {
+                            let leftMin = minL;
+                            if (i === 0) leftMin = Math.max(minL, config.fProduced);
+                            
+                            let sum = 0;
+                            let otherTarget = 0;
+                            let canBorrow = false;
+                            let borrowIdx = -1;
+                            
+                            if (i < config.rolls.length - 1) {
+                              borrowIdx = i + 1;
+                              otherTarget = config.rolls[i+1].targetFormedLength;
+                              sum = roll.targetFormedLength + otherTarget;
+                              canBorrow = true;
+                            } else if (i > 0) {
+                              borrowIdx = i - 1;
+                              otherTarget = config.rolls[i-1].targetFormedLength;
+                              sum = roll.targetFormedLength + otherTarget;
+                              leftMin = minL;
+                              canBorrow = true;
+                            }
+                            
+                            if (canBorrow) {
+                               const borrowMin = borrowIdx === 0 ? Math.max(minL, config.fProduced) : minL;
+                               const maxAllowed = Math.min(maxL, sum - borrowMin);
+                               const minAllowed = Math.max(leftMin, sum - maxL);
+                               
+                               if (minAllowed <= maxAllowed) {
+                                  val = Math.max(minAllowed, Math.min(maxAllowed, val));
+                               } else {
+                                  val = Math.max(leftMin, Math.min(maxL, val));
+                               }
+                               
+                               const delta = val - roll.targetFormedLength;
+                               const newRolls = [...config.rolls];
+                               newRolls[i] = { ...newRolls[i], targetFormedLength: val };
+                               newRolls[borrowIdx] = { ...newRolls[borrowIdx], targetFormedLength: newRolls[borrowIdx].targetFormedLength - delta };
+                               updateConfig(lineId, { ...config, rolls: newRolls });
+                            } else {
+                               val = Math.max(leftMin, Math.min(maxL, val));
+                               const newRolls = [...config.rolls];
+                               newRolls[i] = { ...newRolls[i], targetFormedLength: val };
+                               updateConfig(lineId, { ...config, rolls: newRolls });
+                            }
                           }
-                          
-                          if (canBorrow) {
-                             const borrowMin = borrowIdx === 0 ? Math.max(minL, config.fProduced) : minL;
-                             const maxAllowed = Math.min(maxL, sum - borrowMin);
-                             const minAllowed = Math.max(leftMin, sum - maxL);
-                             
-                             if (minAllowed <= maxAllowed) {
-                                val = Math.max(minAllowed, Math.min(maxAllowed, val));
-                             } else {
-                                val = Math.max(leftMin, Math.min(maxL, val));
-                             }
-                             
-                             const delta = val - roll.targetFormedLength;
-                             const newRolls = [...config.rolls];
-                             newRolls[i] = { ...newRolls[i], targetFormedLength: val };
-                             newRolls[borrowIdx] = { ...newRolls[borrowIdx], targetFormedLength: newRolls[borrowIdx].targetFormedLength - delta };
-                             updateConfig(lineId, { ...config, rolls: newRolls });
-                          } else {
-                             val = Math.max(leftMin, Math.min(maxL, val));
-                             const newRolls = [...config.rolls];
-                             newRolls[i] = { ...newRolls[i], targetFormedLength: val };
-                             updateConfig(lineId, { ...config, rolls: newRolls });
+                          // Note: we can't clear setEditingRollIdx(null) onBlur because it blocks click events on the Plus/Trash icons.
+                          // Instead, let's use a timeout or let the click handler in the background close it.
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') { setEditingRollIdx(null); setDeleteConfirmIdx(null); }
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            (e.target as HTMLElement).blur();
+                            setEditingRollIdx(null);
+                            setDeleteConfirmIdx(null);
                           }
-                        }
-                        setEditingRollIdx(null);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Escape') setEditingRollIdx(null);
-                      }}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                    <span className="text-xs text-blue-900 font-bold ml-0.5">m</span>
-                  </form>
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    </form>
+
+                    {/* Toolbar popup below the progress bar */}
+                    <div className="absolute top-full left-1/2 -translate-x-1/2 mt-8 bg-slate-900 border border-slate-700 shadow-xl rounded-lg p-1 flex items-center gap-1 z-50">
+                      <div className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-slate-900 border-t border-l border-slate-700 rotate-45"></div>
+                      <button 
+                        type="button"
+                        className="p-1.5 hover:bg-slate-800 rounded text-emerald-400 flex items-center gap-1 pr-2 z-10 block"
+                        onPointerDown={(e) => { e.stopPropagation(); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const newRolls = [...config.rolls];
+                          const half = newRolls[i].targetFormedLength / 2;
+                          newRolls[i].targetFormedLength = half;
+                          newRolls.splice(i + 1, 0, {
+                            id: Math.random().toString(),
+                            targetFormedLength: half,
+                            isJoint: false,
+                            batchNumber: newRolls[i].batchNumber
+                          });
+                          updateConfig(lineId, { ...config, rolls: newRolls });
+                          setEditingRollIdx(null);
+                        }}
+                      >
+                        <Plus size={14} strokeWidth={3} />
+                        <span className="text-[10px] font-bold">加卷</span>
+                      </button>
+
+                      {config.rolls.length > 1 && (
+                        <div className="w-px h-4 bg-slate-700 z-10"></div>
+                      )}
+
+                      {(config.rolls.length > 1) && (
+                        deleteConfirmIdx === i ? (
+                          <div className="flex items-center gap-1 pr-1 pl-1">
+                            <button
+                                type="button"
+                                className="px-2 py-1 bg-red-500 hover:bg-red-600 text-white rounded text-[10px] font-bold z-10"
+                                onPointerDown={(e) => { e.stopPropagation(); }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const newRolls = [...config.rolls];
+                                  if (i === newRolls.length - 1 && i > 0) {
+                                    newRolls[i-1].targetFormedLength += newRolls[i].targetFormedLength;
+                                    newRolls[i-1].isJoint = newRolls[i].isJoint;
+                                    newRolls[i-1].batchNumber = newRolls[i].batchNumber;
+                                    newRolls.splice(i, 1);
+                                  } else if (i < newRolls.length - 1) {
+                                    newRolls[i].targetFormedLength += newRolls[i+1].targetFormedLength;
+                                    newRolls[i].isJoint = newRolls[i+1].isJoint;
+                                    newRolls[i].batchNumber = newRolls[i+1].batchNumber;
+                                    newRolls.splice(i+1, 1);
+                                  }
+                                  updateConfig(lineId, { ...config, rolls: newRolls });
+                                  setEditingRollIdx(null);
+                                  setDeleteConfirmIdx(null);
+                                }}
+                            >确认删除</button>
+                            <button
+                                type="button"
+                                className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded text-[10px] font-bold z-10"
+                                onPointerDown={(e) => { e.stopPropagation(); }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setDeleteConfirmIdx(null);
+                                }}
+                            >取消</button>
+                          </div>
+                        ) : (
+                          <button 
+                            type="button"
+                            className="p-1.5 hover:bg-slate-800 rounded text-red-400 flex items-center gap-1 pr-2 z-10 block"
+                            onPointerDown={(e) => { e.stopPropagation(); }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeleteConfirmIdx(i);
+                            }}
+                          >
+                            <Trash2 size={14} />
+                            <span className="text-[10px] font-bold">删除</span>
+                          </button>
+                        )
+                      )}
+                    </div>
+                  </div>
                 ) : (
                   <>
                     {isPoppedOut && (
@@ -1595,26 +1669,39 @@ export default function App() {
 
   const handleAddFutureRoll = () => {
     if (!forecastBatch || !forecastLength) return;
-    setLineConfigs((p) => {
-      const lineConf = p[selectedLine];
-      const frs = lineConf.futureRolls || [];
-      return {
-        ...p,
-        [selectedLine]: {
-          ...lineConf,
-          futureRolls: [
-            ...frs,
-            {
-              id: Math.random().toString(),
-              batchNo: forecastBatch,
-              length: Number(forecastLength),
-            },
-          ],
-        },
-      };
-    });
+    const lineConf = lineConfigs[selectedLine];
+    const frs = lineConf.futureRolls || [];
+    const newConfigs = {
+      ...lineConfigs,
+      [selectedLine]: {
+        ...lineConf,
+        futureRolls: [
+          ...frs,
+          {
+            id: Math.random().toString(),
+            batchNo: forecastBatch,
+            length: Number(forecastLength),
+          },
+        ],
+      },
+    };
+    handleGeneratePlan(selectedLine, newConfigs);
     setForecastBatch("");
     setForecastLength("");
+  };
+
+  const handleRemoveFutureRoll = (id: string) => {
+    const p = lineConfigs;
+    const newConfigs = {
+      ...p,
+      [selectedLine]: {
+        ...p[selectedLine],
+        futureRolls: p[selectedLine].futureRolls!.filter(
+          (x) => x.id !== id
+        ),
+      },
+    };
+    handleGeneratePlan(selectedLine, newConfigs);
   };
 
   const handleSavePlan = () => {
@@ -2256,247 +2343,165 @@ export default function App() {
                         )
                       </span>
                     </h3>
+                    <button 
+                      onClick={() => {
+                        const curLS = `${Math.floor(mealConfig.lunchStart)}:${Math.floor((mealConfig.lunchStart % 1) * 60).toString().padStart(2, "0")}`;
+                        const curLE = `${Math.floor(mealConfig.lunchEnd)}:${Math.floor((mealConfig.lunchEnd % 1) * 60).toString().padStart(2, "0")}`;
+                        const curDS = `${Math.floor(mealConfig.dinnerStart)}:${Math.floor((mealConfig.dinnerStart % 1) * 60).toString().padStart(2, "0")}`;
+                        const curDE = `${Math.floor(mealConfig.dinnerEnd)}:${Math.floor((mealConfig.dinnerEnd % 1) * 60).toString().padStart(2, "0")}`;
+                        const isNight = getCurrentShiftStart(currentTime).getHours() === 20;
+
+                        const curS = isNight ? curDS : curLS;
+                        const curE = isNight ? curDE : curLE;
+
+                        const res = prompt(
+                          `${isNight ? "夜间" : "白班"}进餐时间范围 (格式: HH:MM-HH:MM)`,
+                          `${curS}-${curE}`
+                        );
+                        if (res && res.includes("-")) {
+                          const parts = res.split("-");
+                          if (parts.length === 2 && parts[0].includes(":") && parts[1].includes(":")) {
+                            const [sh, sm] = parts[0].split(":").map(Number);
+                            const [eh, em] = parts[1].split(":").map(Number);
+                            if (!isNaN(sh) && !isNaN(sm) && !isNaN(eh) && !isNaN(em)) {
+                              setMealConfig(p => ({
+                                ...p,
+                                ...(!isNight ? { lunchStart: sh + sm / 60, lunchEnd: eh + em / 60 } : { dinnerStart: sh + sm / 60, dinnerEnd: eh + em / 60 })
+                              }));
+                            }
+                          }
+                        }
+                      }}
+                      className="text-xs text-blue-500 hover:text-blue-600 underline font-medium"
+                    >
+                      设置进餐时间
+                    </button>
                   </div>
 
-                  <div className="-mx-4 sm:mx-0 w-[calc(100%+32px)] sm:w-full border-y sm:border-none p-3 sm:p-5 h-[160px] relative overflow-x-auto hide-scrollbar">
-                    <div className="h-full relative">
-                      {/* Timeline Background & Ticks */}
-                      <div className="absolute left-6 right-6 top-8 bottom-4 flex">
-                      {[...Array(12)].map((_, i) => (
-                        <div
-                          key={i}
-                          className="flex-1 border-l border-slate-100 relative group"
-                        >
-                          <span className={`absolute -top-6 ${i === 0 ? '' : '-translate-x-1/2'} text-[10px] font-bold text-slate-400`}>
-                            {((getCurrentShiftStart(currentTime).getHours() ===
-                            20
-                              ? 20
-                              : 8) +
-                              i) %
-                              24}
-                            h
-                          </span>
-                        </div>
-                      ))}
-                        {/* 12th Hour Tick (End) */}
-                        <div className="border-l border-slate-100 relative h-full">
-                          <span className="absolute -top-6 -translate-x-full text-[10px] font-bold text-slate-400">
-                            {((getCurrentShiftStart(currentTime).getHours() ===
-                            20
-                              ? 20
-                              : 8) +
-                              12) %
-                              24}
-                            h
-                          </span>
-                        </div>
-                    </div>
+                  <div className="p-4 flex flex-col gap-2 relative">
+                    {/* Vertical Timeline Track */}
+                    <div className="absolute left-[39px] top-6 bottom-4 w-px bg-slate-200 z-0"></div>
 
-                    {/* Render Computed Line Plans */}
-                    <div className="absolute left-6 right-6 top-8 bottom-4 flex flex-col gap-1">
-                      {LINES.map((lineId) => {
+                    {(() => {
+                      const shiftS = getCurrentShiftStart(currentTime);
+                      const shiftE = getCurrentShiftEnd(currentTime);
+                      
+                      type TimelineEvent = {
+                        id: string;
+                        time: Date;
+                        lineId: LineId;
+                        type: 'completed' | 'plan';
+                        length: number;
+                        isJoint?: boolean;
+                      };
+
+                      let allEvents: TimelineEvent[] = [];
+
+                      LINES.forEach(lineId => {
                         const mappedRolls = getComputedPlanForLine(lineId);
-                        if (mappedRolls.length === 0) return null;
+                        const completedRolls = lineConfigs[lineId].completedRolls || [];
+                        
+                        completedRolls.forEach(cr => {
+                          const t = new Date(cr.unrollTime);
+                          if (t.getTime() >= shiftS.getTime() && t.getTime() <= shiftE.getTime()) {
+                            allEvents.push({
+                              id: `c-${lineId}-${cr.id}`,
+                              time: t,
+                              lineId,
+                              type: 'completed',
+                              length: Number(cr.length) || 0
+                            });
+                          }
+                        });
 
-                        let shiftS = getCurrentShiftStart(currentTime);
+                        mappedRolls.forEach(r => {
+                          const t = r.endTime;
+                          if (t.getTime() >= shiftS.getTime() && t.getTime() <= shiftE.getTime()) {
+                            allEvents.push({
+                              id: `p-${lineId}-${r.id}`,
+                              time: t,
+                              lineId,
+                              type: 'plan',
+                              length: r.targetFormedLength,
+                              isJoint: r.isJoint
+                            });
+                          }
+                        });
+                      });
 
+                      allEvents.sort((a, b) => a.time.getTime() - b.time.getTime());
+
+                      if (allEvents.length === 0) {
+                        return <div className="text-sm text-slate-400 italic pl-12 text-center py-4">当前班次无分卷任务</div>;
+                      }
+
+                      return allEvents.map((evt, idx) => {
                         return (
-                          <div
-                            key={lineId}
-                            className="h-[14px] w-full relative border-b border-slate-100/50 mt-1"
-                          >
-                            {lineConfigs[lineId].completedRolls?.map((cr: any, i: number) => {
-                              const endTime = new Date(cr.unrollTime);
-                              const endMinutesFromStart = differenceInMinutes(endTime, shiftS);
-                              const startMinutesFromStart = endMinutesFromStart - cr.length / lineConfigs[lineId].speed;
-                              const maxMinutes = differenceInMinutes(getCurrentShiftEnd(currentTime), shiftS);
-                              
-                              const pctLeft = (startMinutesFromStart / maxMinutes) * 100;
-                              const pctWidth = ((cr.length / lineConfigs[lineId].speed) / maxMinutes) * 100;
-                              
-                              if (pctLeft > 100 || pctLeft + pctWidth < 0) return null;
-
-                              return (
-                                <div
-                                  key={`completed-${cr.id}`}
-                                  className="absolute top-0 bottom-0 flex flex-col items-center justify-center group pointer-events-none rounded-full border-r border-slate-100/50"
-                                  style={{
-                                    left: `${Math.max(0, pctLeft)}%`,
-                                    width: `${pctLeft < 0 ? pctWidth + pctLeft : pctWidth}%`,
-                                    backgroundColor: `hsl(145, 60%, ${i % 2 === 0 ? "80%" : "75%"})`, // emerald color
-                                  }}
-                                >
-                                  {pctLeft + pctWidth > 0 && pctLeft < 100 && (
-                                    <span className="text-[8px] font-black text-emerald-900/80 pointer-events-auto">
-                                      已卸
-                                    </span>
-                                  )}
-                                </div>
-                              );
-                            })}
-                            {mappedRolls.map((r) => {
-                              const leftPct =
-                                ((r.startTime.getTime() - shiftS.getTime()) /
-                                  (3600000 * 12)) *
-                                100;
-                              const wPct =
-                                ((r.endTime.getTime() - r.startTime.getTime()) /
-                                  (3600000 * 12)) *
-                                100;
-                              if (leftPct > 100 || leftPct + wPct < 0)
-                                return null;
-
-                              return (
-                                <TimelineRoll
-                                  key={r.id}
-                                  r={{ ...r, speed: lineConfigs[lineId].speed }}
-                                  leftPct={leftPct}
-                                  wPct={wPct}
-                                  lineId={lineId}
-                                  onChangeLength={(id, newLen) => {
-                                    setLineConfigs((prev) => {
-                                      const rolls = [...prev[lineId].rolls];
-                                      const idx = rolls.findIndex(
-                                        (rl) => rl.id === id,
-                                      );
-                                      if (idx > -1) {
-                                        rolls[idx] = {
-                                          ...rolls[idx],
-                                          targetFormedLength: Math.max(
-                                            10,
-                                            Math.round(newLen),
-                                          ),
-                                        };
-                                      }
-                                      return {
-                                        ...prev,
-                                        [lineId]: { ...prev[lineId], rolls },
-                                      };
-                                    });
-                                  }}
-                                />
-                              );
-                            })}
-                            <span className="absolute -left-5 top-[1px] text-[8px] font-bold text-slate-400">
-                              {lineId}#
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    {/* Constraint Overlays */}
-                    <div className="absolute left-6 right-6 top-8 bottom-4">
-                      {(() => {
-                        const shiftS = getCurrentShiftStart(currentTime);
-                        const shiftH = shiftS.getHours();
-
-                        const renderMeal = (startH: number, endH: number) => {
-                          let relH = startH - shiftH;
-                          if (relH < 0) relH += 24;
-                          let wH = endH - startH;
-                          if (wH < 0) wH += 24;
-
-                          if (relH > 12) return null; // not in this shift
-
-                          const leftPct = (relH / 12) * 100;
-                          const wPct = (wH / 12) * 100;
-
-                          return (
-                            <div
-                              title="进餐时间约束 (双击调整)"
-                              onDoubleClick={() => {
-                                const isLunch =
-                                  startH === mealConfig.lunchStart;
-                                const curEnd = isLunch
-                                  ? mealConfig.lunchEnd
-                                  : mealConfig.dinnerEnd;
-                                const curS = `${Math.floor(startH)}:${Math.floor(
-                                  (startH % 1) * 60,
-                                )
-                                  .toString()
-                                  .padStart(2, "0")}`;
-                                const curE = `${Math.floor(curEnd)}:${Math.floor(
-                                  (curEnd % 1) * 60,
-                                )
-                                  .toString()
-                                  .padStart(2, "0")}`;
-                                const res = prompt(
-                                  `${isLunch ? "午间" : "晚间"}进餐时间范围 (格式: HH:MM-HH:MM)`,
-                                  `${curS}-${curE}`,
-                                );
-                                if (res && res.includes("-")) {
-                                  const parts = res.split("-");
-                                  if (
-                                    parts.length === 2 &&
-                                    parts[0].includes(":") &&
-                                    parts[1].includes(":")
-                                  ) {
-                                    const [sh, sm] = parts[0]
-                                      .split(":")
-                                      .map(Number);
-                                    const [eh, em] = parts[1]
-                                      .split(":")
-                                      .map(Number);
-                                    if (
-                                      !isNaN(sh) &&
-                                      !isNaN(sm) &&
-                                      !isNaN(eh) &&
-                                      !isNaN(em)
-                                    ) {
-                                      setMealConfig((p) => ({
-                                        ...p,
-                                        ...(isLunch
-                                          ? {
-                                              lunchStart: sh + sm / 60,
-                                              lunchEnd: eh + em / 60,
-                                            }
-                                          : {
-                                              dinnerStart: sh + sm / 60,
-                                              dinnerEnd: eh + em / 60,
-                                            }),
-                                      }));
-                                    }
-                                  }
-                                }
-                              }}
-                              className="absolute top-0 bottom-0 bg-stripes-red rounded bg-red-50/50 border border-red-200 flex items-center justify-center -z-10 hover:bg-red-50 hover:cursor-pointer transition-colors"
-                              style={{ left: `${leftPct}%`, width: `${wPct}%` }}
-                            >
-                              <span className="text-[10px] font-black text-red-500 rotate-90 xl:rotate-0 tracking-widest uppercase">
-                                进餐时段
+                          <div key={evt.id} className="flex items-stretch gap-4 relative z-10 group">
+                            {/* Time */}
+                            <div className="w-20 shrink-0 text-right py-2.5">
+                              <span className="font-mono font-bold text-slate-700 text-sm">
+                                {evt.time.toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute:'2-digit'})}
                               </span>
                             </div>
-                          );
-                        };
 
-                        return (
-                          <>
-                            {renderMeal(
-                              mealConfig.lunchStart,
-                              mealConfig.lunchEnd,
-                            )}
-                            {renderMeal(
-                              mealConfig.dinnerStart,
-                              mealConfig.dinnerEnd,
-                            )}
-                          </>
+                            {/* Node */}
+                            <div className="flex flex-col items-center">
+                              <div className={cn(
+                                "w-3 h-3 rounded-full mt-3 border-[3px] shadow-sm transform group-hover:scale-125 transition-transform",
+                                evt.type === 'completed' ? "bg-emerald-500 border-emerald-100" : (
+                                  evt.isJoint ? "bg-orange-500 border-orange-100" : "bg-blue-500 border-blue-100"
+                                )
+                              )}></div>
+                            </div>
+
+                            {/* Card */}
+                            <div className="flex-1 py-1">
+                              {evt.type === 'completed' ? (
+                                <div className="flex items-center bg-white border border-emerald-200 rounded-xl px-4 py-2 gap-3 shadow-sm hover:shadow transition-shadow">
+                                  <div className="w-8 h-8 rounded-lg bg-emerald-50 flex items-center justify-center font-black text-emerald-700">
+                                    {evt.lineId}#
+                                  </div>
+                                  <div className="flex-1 flex flex-col">
+                                    <span className="text-emerald-700 font-bold text-xs px-1.5 py-0.5 rounded bg-emerald-100/50 self-start mb-0.5">已卸卷</span>
+                                  </div>
+                                  <div className="text-right flex flex-col">
+                                    <span className="text-slate-700 font-black text-base">{evt.length.toFixed(1)}<span className="text-xs text-slate-400 ml-0.5">m</span></span>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className={cn(
+                                  "flex items-center bg-white border rounded-xl px-4 py-2 gap-3 shadow-sm hover:shadow transition-shadow",
+                                  evt.isJoint ? "border-orange-300 shadow-orange-50" : "border-slate-200/80"
+                                )}>
+                                  <div className={cn(
+                                    "w-8 h-8 rounded-lg flex items-center justify-center font-black",
+                                    evt.isJoint ? "bg-orange-50 text-orange-700" : "bg-slate-50 text-slate-700"
+                                  )}>
+                                    {evt.lineId}#
+                                  </div>
+                                  <div className="flex-1 flex flex-col">
+                                    {evt.isJoint ? (
+                                      <div className="flex items-center gap-1.5 self-start mb-0.5">
+                                        <span className="text-white font-bold text-xs px-2 py-0.5 rounded shadow-sm bg-gradient-to-r from-orange-500 to-red-500 animate-pulse">接头分卷</span>
+                                      </div>
+                                    ) : (
+                                      <span className="text-blue-700 font-bold text-xs px-1.5 py-0.5 rounded bg-blue-50 self-start mb-0.5">分卷</span>
+                                    )}
+                                  </div>
+                                  <div className="text-right flex flex-col">
+                                    <span className={cn(
+                                      "font-black text-base",
+                                      evt.isJoint ? "text-orange-700" : "text-slate-800"
+                                    )}>{evt.length.toFixed(1)}<span className="text-xs font-bold opacity-60 ml-0.5">m</span></span>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
                         );
-                      })()}
-                    </div>
-
-                    {/* Current Time Indicator (if currently in this shift) */}
-                    <div className="absolute left-6 right-6 top-8 bottom-4 pointer-events-none">
-                      <div
-                        className="absolute top-0 bottom-0 border-l-2 border-blue-500 z-20"
-                        style={{
-                          left: `${Math.max(0, Math.min(100, ((currentTime.getTime() - getCurrentShiftStart(currentTime).getTime()) / (12 * 3600000)) * 100))}%`,
-                        }}
-                      >
-                        <div className="w-2.5 h-2.5 bg-blue-500 rounded-full absolute -top-1 -left-[5px] ring-4 ring-blue-500/20 shadow-lg"></div>
-                      </div>
-                    </div>
-                    </div>
+                      });
+                    })()}
                   </div>
                 </section>
               {/* Tactical Action Terminal (Right Column) */}
@@ -2709,17 +2714,7 @@ export default function App() {
                                       <span className="text-emerald-400 font-mono">总长: {fr.length} m</span>
                                     </div>
                                     <button
-                                      onClick={() =>
-                                        setLineConfigs((p) => ({
-                                          ...p,
-                                          [selectedLine]: {
-                                            ...p[selectedLine],
-                                            futureRolls: p[selectedLine].futureRolls!.filter(
-                                              (x) => x.id !== fr.id
-                                            ),
-                                          },
-                                        }))
-                                      }
+                                      onClick={() => handleRemoveFutureRoll(fr.id)}
                                       className="text-red-400 hover:text-red-300 opacity-0 group-hover:opacity-100 transition-opacity p-1"
                                       title="移除该排队卷"
                                     >
@@ -3373,22 +3368,7 @@ export default function App() {
                                             {r.length}m
                                           </div>
                                           <button
-                                            onClick={() => {
-                                              setLineConfigs((p) => {
-                                                const lineConf =
-                                                  p[selectedLine];
-                                                return {
-                                                  ...p,
-                                                  [selectedLine]: {
-                                                    ...lineConf,
-                                                    futureRolls:
-                                                      lineConf.futureRolls!.filter(
-                                                        (x) => x.id !== r.id,
-                                                      ),
-                                                  },
-                                                };
-                                              });
-                                            }}
+                                            onClick={() => handleRemoveFutureRoll(r.id)}
                                             className="text-red-400 hover:text-red-300 opacity-50 hover:opacity-100 transition-opacity"
                                           >
                                             <Trash2 size={12} />
@@ -4067,11 +4047,10 @@ export default function App() {
               <button
                 onClick={() => {
                   if (addFoilLength) {
-                    setLineConfigs((p) => {
-                      const conf = p[selectedLine];
+                      const conf = lineConfigs[selectedLine];
                       const frs = conf.futureRolls || [];
-                      return {
-                        ...p,
+                      const newConfigs = {
+                        ...lineConfigs,
                         [selectedLine]: {
                           ...conf,
                           futureRolls: [
@@ -4084,7 +4063,7 @@ export default function App() {
                           ],
                         },
                       };
-                    });
+                    handleGeneratePlan(selectedLine, newConfigs);
                     setAddFoilBatch("");
                     setAddFoilLength("");
                   }
@@ -4098,11 +4077,10 @@ export default function App() {
               <button
                 onClick={() => {
                   if (addFoilLength) {
-                    setLineConfigs((p) => {
-                      const conf = p[selectedLine];
+                      const conf = lineConfigs[selectedLine];
                       const frs = conf.futureRolls || [];
-                      return {
-                        ...p,
+                      const newConfigs = {
+                        ...lineConfigs,
                         [selectedLine]: {
                           ...conf,
                           futureRolls: [
@@ -4115,7 +4093,7 @@ export default function App() {
                           ],
                         },
                       };
-                    });
+                    handleGeneratePlan(selectedLine, newConfigs);
                     setAddFoilDialog(false);
                   }
                 }}
