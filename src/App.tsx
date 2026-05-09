@@ -37,6 +37,8 @@ import {
   Menu,
   X,
   Database,
+  Flag,
+  MapPin,
 } from "lucide-react";
 import { cn } from "./lib/utils";
 
@@ -1197,12 +1199,17 @@ function DraggableTimelineLine({
                           e.stopPropagation();
                           const newRolls = [...config.rolls];
                           const half = newRolls[i].targetFormedLength / 2;
+                          const wasJoint = newRolls[i].isJoint;
+                          
                           newRolls[i].targetFormedLength = half;
+                          newRolls[i].isJoint = false;
+                          
                           newRolls.splice(i + 1, 0, {
                             id: Math.random().toString(),
                             targetFormedLength: half,
-                            isJoint: false,
-                            batchNumber: newRolls[i].batchNumber
+                            isJoint: wasJoint,
+                            batchNumber: newRolls[i].batchNumber,
+                            formedBatchNo: newRolls[i].formedBatchNo
                           });
                           updateConfig(lineId, { ...config, rolls: newRolls });
                           setEditingRollIdx(null);
@@ -1226,17 +1233,30 @@ function DraggableTimelineLine({
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   const newRolls = [...config.rolls];
-                                  if (i === newRolls.length - 1 && i > 0) {
-                                    newRolls[i-1].targetFormedLength += newRolls[i].targetFormedLength;
-                                    newRolls[i-1].isJoint = newRolls[i].isJoint;
-                                    newRolls[i-1].batchNumber = newRolls[i].batchNumber;
-                                    newRolls.splice(i, 1);
-                                  } else if (i < newRolls.length - 1) {
-                                    newRolls[i].targetFormedLength += newRolls[i+1].targetFormedLength;
-                                    newRolls[i].isJoint = newRolls[i+1].isJoint;
-                                    newRolls[i].batchNumber = newRolls[i+1].batchNumber;
-                                    newRolls.splice(i+1, 1);
+                                  
+                                  let targetCut: number | null = null;
+                                  if (i > 0 && !newRolls[i-1].isJoint) {
+                                      targetCut = i - 1; 
+                                  } else if (i < newRolls.length - 1 && !newRolls[i].isJoint) {
+                                      targetCut = i;
                                   }
+                                  
+                                  if (targetCut === null) {
+                                     alert("无法删除此卷，因为必须保留这部分的接头出带节点！");
+                                     setDeleteConfirmIdx(null);
+                                     return;
+                                  }
+
+                                  if (targetCut === i - 1) {
+                                      newRolls[i-1].targetFormedLength += newRolls[i].targetFormedLength;
+                                      newRolls[i-1].isJoint = newRolls[i-1].isJoint || newRolls[i].isJoint;
+                                      newRolls.splice(i, 1);
+                                  } else {
+                                      newRolls[i].targetFormedLength += newRolls[i+1].targetFormedLength;
+                                      newRolls[i].isJoint = newRolls[i].isJoint || newRolls[i+1].isJoint;
+                                      newRolls.splice(i+1, 1);
+                                  }
+
                                   updateConfig(lineId, { ...config, rolls: newRolls });
                                   setEditingRollIdx(null);
                                   setDeleteConfirmIdx(null);
@@ -1326,36 +1346,73 @@ function DraggableTimelineLine({
         const minutesFromShiftStart = currMinutesFromStart + minutesElapsed;
         const leftPct = (minutesFromShiftStart / maxMinutes) * 100;
         const nodeTime = addMinutes(currentTime, minutesElapsed);
+        const isJoint = config.rolls[i].isJoint;
+        const isDraggable = !isJoint;
+        
+        let frontStartLeftPct = 0;
+        let frontStartTime = new Date();
+        if (isJoint) {
+          const frontStartMins = minutesElapsed - 240 / config.speed;
+          const frontStartFromShiftStart = currMinutesFromStart + frontStartMins;
+          frontStartLeftPct = (frontStartFromShiftStart / maxMinutes) * 100;
+          frontStartTime = addMinutes(currentTime, frontStartMins);
+        }
 
         return (
-          <div
-            key={"handle-" + i}
-            className="absolute top-0 bottom-0 w-8 -ml-4 cursor-col-resize flex justify-center items-center z-20 hover:bg-black/5 active:bg-black/10 transition-colors touch-none"
-            style={{ left: `${leftPct}%` }}
-            onPointerDown={(e) => {
-              e.currentTarget.setPointerCapture(e.pointerId);
-              setDraggingIdx(i);
-            }}
-            onPointerUp={(e) => {
-              e.currentTarget.releasePointerCapture(e.pointerId);
-              setDraggingIdx(null);
-            }}
-          >
+          <React.Fragment key={"handle-" + i}>
+            {isJoint && frontStartLeftPct >= -10 && (
+              <div
+                className="absolute top-0 bottom-0 w-8 -ml-4 flex justify-center items-center z-10 pointer-events-none"
+                style={{ left: `${frontStartLeftPct}%` }}
+              >
+                <div className="absolute -top-6 bg-blue-100 text-blue-900 text-[10px] font-bold px-1.5 py-0.5 rounded shadow border border-blue-400 transform -translate-x-1/2 left-1/2 flex items-center gap-1 whitespace-nowrap z-20">
+                  <MapPin size={12} className="text-blue-600 drop-shadow" />
+                  前端处理接头 {format(frontStartTime, "HH:mm")}
+                </div>
+                <div className="w-0.5 h-full bg-blue-500/80 shadow border-x border-white/50" />
+              </div>
+            )}
+            
             <div
               className={cn(
-                "w-1.5 h-8 rounded-full shadow-md transition-colors",
-                draggingIdx === i
-                  ? "bg-blue-600"
-                  : "bg-white border border-slate-300",
+                "absolute top-0 bottom-0 w-8 -ml-4 flex justify-center items-center z-20 transition-colors touch-none pointer-events-none",
+                isDraggable && "pointer-events-auto cursor-col-resize hover:bg-black/5 active:bg-black/10"
               )}
-            />
-            <div className="absolute top-[110%] w-max bg-slate-800 text-white text-[10px] font-mono px-1.5 py-0.5 rounded shadow pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity">
-              {format(nodeTime, "HH:mm")}
+              style={{ left: `${leftPct}%` }}
+              onPointerDown={(e) => {
+                if (!isDraggable) return;
+                e.currentTarget.setPointerCapture(e.pointerId);
+                setDraggingIdx(i);
+              }}
+              onPointerUp={(e) => {
+                if (!isDraggable) return;
+                e.currentTarget.releasePointerCapture(e.pointerId);
+                setDraggingIdx(null);
+              }}
+            >
+              <div
+                className={cn(
+                  "w-1.5 h-8 rounded-full shadow-md transition-colors relative flex items-center justify-center",
+                  draggingIdx === i
+                    ? "bg-blue-600"
+                    : (isDraggable ? "bg-white border border-slate-300" : "bg-red-500 border border-red-600 shadow-red-500/50 z-10"),
+                )}
+              >
+                {isJoint && (
+                  <div className="absolute -top-6 text-red-500 z-20 hover:scale-125 transition-transform drop-shadow" title="接头出线">
+                    <Flag size={18} fill="currentColor" />
+                  </div>
+                )}
+              </div>
+              <div className="absolute top-[110%] w-max bg-slate-800 text-white text-[10px] font-mono px-1.5 py-0.5 rounded shadow pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+                {isJoint && <Flag size={10} fill="currentColor" className="text-red-400" />}
+                {format(nodeTime, "HH:mm")}
+              </div>
+              <div className="absolute top-[14px] bg-blue-50/90 text-blue-800 text-[9px] font-bold px-1 rounded pointer-events-none flex items-center gap-0.5">
+                {format(nodeTime, "HH:mm")}
+              </div>
             </div>
-            <div className="absolute top-[14px] bg-blue-50/90 text-blue-800 text-[9px] font-bold px-1 rounded pointer-events-none">
-              {format(nodeTime, "HH:mm")}
-            </div>
-          </div>
+          </React.Fragment>
         );
       })}
     </div>
@@ -1364,7 +1421,7 @@ function DraggableTimelineLine({
 
 export default function App() {
   const [timeOffset, setTimeOffset] = useState(0);
-  const [isPlanningMode, setIsPlanningMode] = useState(false);
+  const [isPlanningMode, setIsPlanningMode] = useState(true);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [showSimulator, setShowSimulator] = useState(false);
   const [simDateStr, setSimDateStr] = useState("");
@@ -1603,65 +1660,78 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [punchRecords, user, dateKey]);
 
+  const lastCompleteTimeRef = useRef<{ [key: string]: number }>({});
+  
   const handleCompleteRoll = (lineId: LineId) => {
-    const c = lineConfigs[lineId];
-    if (c.rolls.length === 0) return;
-
-    const currentRoll = c.rolls[0];
-
-    const actualLStr = rollCompletionInputs[lineId];
-    const timeStr = rollCompletionTimeInputs[lineId];
-    if (!actualLStr || !timeStr) return;
-
-    const actualL = parseFloat(actualLStr);
-    if (isNaN(actualL) || actualL <= 0) return;
-
-    const [hours, minutes] = timeStr.split(":").map(Number);
-    const unrollDate = new Date(currentTime);
-    unrollDate.setHours(hours, minutes, 0, 0);
-
-    if (unrollDate > currentTime) {
-      // Must be yesterday
-      unrollDate.setDate(unrollDate.getDate() - 1);
+    const now = Date.now();
+    if (lastCompleteTimeRef.current[lineId] && now - lastCompleteTimeRef.current[lineId] < 1000) {
+      return; // prevent double clicks
     }
+    lastCompleteTimeRef.current[lineId] = now;
 
-    const diff = actualL - currentRoll.targetFormedLength;
+    setLineConfigs((p) => {
+      const c = p[lineId];
+      if (c.rolls.length === 0) return p;
 
-    const newRolls = [...c.rolls];
-    newRolls.shift(); // remove completed roll
+      const currentRoll = c.rolls[0];
+      const actualLStr = rollCompletionInputs[lineId];
+      const timeStr = rollCompletionTimeInputs[lineId];
+      
+      if (!actualLStr || !timeStr) return p;
 
-    if (newRolls.length > 0) {
-      newRolls[0] = {
-        ...newRolls[0],
-        targetFormedLength: Math.max(10, newRolls[0].targetFormedLength - diff),
+      const actualL = parseFloat(actualLStr);
+      if (isNaN(actualL) || actualL <= 0) return p;
+
+      const [hours, minutes] = timeStr.split(":").map(Number);
+      const unrollDate = new Date(currentTime);
+      unrollDate.setHours(hours, minutes, 0, 0);
+
+      if (unrollDate > currentTime) {
+        // Must be yesterday
+        unrollDate.setDate(unrollDate.getDate() - 1);
+      }
+
+      const diff = actualL - currentRoll.targetFormedLength;
+
+      const newRolls = [...c.rolls];
+      newRolls.shift(); // remove completed roll
+
+      if (newRolls.length > 0) {
+        newRolls[0] = {
+          ...newRolls[0],
+          targetFormedLength: Math.max(10, newRolls[0].targetFormedLength - diff),
+        };
+      }
+
+      const completed = [...(c.completedRolls || [])];
+      
+      // Prevent duplicates by checking last completed entry if it happened within 2 seconds
+      // OR better, just clear inputs immediately outside this state setter
+      
+      completed.push({
+        id: Math.random().toString(),
+        batchNo: currentRoll.formedBatchNo || "",
+        corrosionBatchNo: currentRoll.batchNumber || "",
+        length: actualL,
+        unrollTime: unrollDate.toISOString(),
+      });
+
+      const newMineUnrolled = completed.reduce((sum, cr) => sum + Number(cr.length), 0);
+      const minsSinceUnroll = Math.max(0, differenceInMinutes(currentTime, unrollDate));
+      const newFProduced = minsSinceUnroll * c.speed;
+
+      return {
+        ...p,
+        [lineId]: {
+          ...c,
+          rolls: newRolls,
+          cUsed: Math.max(c.cUsed, (c.cPrevUsed || 0) + newMineUnrolled),
+          fProduced: newFProduced,
+          fPrevProduced: 0,
+          completedRolls: completed,
+        },
       };
-    }
-
-    const completed = [...(c.completedRolls || [])];
-    completed.push({
-      id: currentRoll.id,
-      batchNo: currentRoll.formedBatchNo || "",
-      corrosionBatchNo: currentRoll.batchNumber || "",
-      length: actualL,
-      unrollTime: unrollDate.toISOString(),
     });
-
-    const newMineUnrolled = completed.reduce((sum, cr) => sum + cr.length, 0);
-
-    const minsSinceUnroll = Math.max(0, differenceInMinutes(currentTime, unrollDate));
-    const newFProduced = minsSinceUnroll * c.speed;
-
-    setLineConfigs((p) => ({
-      ...p,
-      [lineId]: {
-        ...c,
-        rolls: newRolls,
-        cUsed: Math.max(c.cUsed, (c.cPrevUsed || 0) + newMineUnrolled),
-        fProduced: newFProduced,
-        fPrevProduced: 0,
-        completedRolls: completed,
-      },
-    }));
 
     setRollCompletionInputs((prev) => ({ ...prev, [lineId]: "" }));
     setRollCompletionTimeInputs((prev) => ({ ...prev, [lineId]: "" }));
