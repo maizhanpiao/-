@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Plus, Trash2, ChevronLeft, Save, Calculator, Divide } from "lucide-react";
 import { cn } from "./lib/utils";
 
@@ -27,6 +27,25 @@ export default function DailyRecordPage({
     "25": [],
     "26": [],
   });
+
+  useEffect(() => {
+    try {
+      const savedRecords = localStorage.getItem("daily_records_data");
+      if (savedRecords) {
+        setRecords(JSON.parse(savedRecords));
+      }
+      const savedShiftEndTime = localStorage.getItem("daily_records_shift");
+      if (savedShiftEndTime) {
+        setShiftEndTime(savedShiftEndTime as "20:00" | "08:00");
+      }
+      const savedConfirmedLines = localStorage.getItem("daily_records_confirmed");
+      if (savedConfirmedLines) {
+        setConfirmedLines(JSON.parse(savedConfirmedLines));
+      }
+    } catch (e) {
+      console.error("Failed to parse saved data from localStorage", e);
+    }
+  }, []);
 
   const handleAddRoll = (lineId: string) => {
     if (confirmedLines[lineId]) {
@@ -151,6 +170,9 @@ export default function DailyRecordPage({
           </div>
           <button
             onClick={() => {
+              localStorage.setItem("daily_records_data", JSON.stringify(records));
+              localStorage.setItem("daily_records_shift", shiftEndTime);
+              localStorage.setItem("daily_records_confirmed", JSON.stringify(confirmedLines));
               alert("数据已暂存于本地内存中。");
             }}
             className="flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold text-sm transition-colors shadow-sm"
