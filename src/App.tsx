@@ -3,7 +3,7 @@ import AdminDashboard from "./AdminDashboard";
 import { SettingsPage } from "./SettingsPage";
 import { useAuth } from "./AuthContext";
 import { db } from "./firebase";
-import { doc, getDoc, setDoc, onSnapshot, serverTimestamp } from "firebase/firestore";
+import { doc, getDoc, setDoc, onSnapshot, serverTimestamp, addDoc, collection } from "firebase/firestore";
 import { handleFirestoreError, OperationType } from "./firestoreErrorHandler";
 import {
   format,
@@ -39,8 +39,10 @@ import {
   Database,
   Flag,
   MapPin,
+  Calculator
 } from "lucide-react";
 import { cn } from "./lib/utils";
+import DailyRecordPage from "./DailyRecordPage";
 
 export interface MealConfig {
   lunchStart: number;
@@ -392,18 +394,22 @@ function CombinedPlanTimeline({
             
             {/* Labels */}
             <div className="absolute top-0 left-0 right-0 h-6 text-[10px] text-slate-400 font-bold flex items-start">
-              {[0, 0.25, 0.5, 0.75, 1].map((pct) => {
+              {Array.from({ length: 41 }, (_, i) => i * 0.25).map((pct) => {
                 let transform = "-translate-x-1/2";
                 if (pct === 0) transform = "";
-                if (pct === 1) transform = "-translate-x-full";
                 
+                const tickTime = addMinutes(shiftStart, maxMinutes * pct);
+                const isDifferentDay = tickTime.getDate() !== shiftStart.getDate();
+
                 return (
                   <div
                     key={pct}
-                    className={`absolute whitespace-nowrap ${transform}`}
+                    className={`absolute whitespace-nowrap z-0 ${transform}`}
                     style={{ left: `${pct * 100}%` }}
                   >
-                    {format(addMinutes(shiftStart, maxMinutes * pct), "HH:mm")}
+                    {pct === 0 || isDifferentDay
+                      ? format(tickTime, "MM-dd HH:mm") 
+                      : format(tickTime, "HH:mm")}
                   </div>
                 );
               })}
@@ -1024,7 +1030,7 @@ function DraggableTimelineLine({
               backgroundColor: `hsl(145, 70%, ${i % 2 === 0 ? "80%" : "75%"})`, // emerald color
             }}
           >
-            {pctLeft + pctWidth > 0 && pctLeft < 100 && (
+            {pctLeft + pctWidth > 0 && (
               <span className="text-[10px] font-black text-emerald-900/80 pointer-events-auto flex items-center gap-0.5">
                 {cr.length.toFixed(1)}m <span className="opacity-70 text-[8px]">✓</span>
               </span>
@@ -1050,19 +1056,7 @@ function DraggableTimelineLine({
             maxMinutes) *
           100;
 
-        const duration = endMinutesFromShiftStart - startMinutesFromShiftStart;
-        let visibleCenterPct = 50;
-        let visibleWidthPct = pctWidth;
-        if (duration > 0) {
-          const visibleStartMins = Math.max(0, startMinutesFromShiftStart);
-          const visibleEndMins = Math.max(0, Math.min(maxMinutes, endMinutesFromShiftStart));
-          visibleWidthPct = ((visibleEndMins - visibleStartMins) / maxMinutes) * 100;
-          const visibleMinsCenter = (visibleStartMins + visibleEndMins) / 2;
-          visibleCenterPct =
-            ((visibleMinsCenter - startMinutesFromShiftStart) / duration) * 100;
-        }
-
-        const isPoppedOut = visibleWidthPct < 20;
+        const isPoppedOut = pctWidth < 20;
 
         return (
           <div
@@ -1080,7 +1074,7 @@ function DraggableTimelineLine({
             }}
           >
             {/* Joint Marker at the end of the roll */}
-            {roll.isJoint && pctLeft + pctWidth <= 100 && (
+            {roll.isJoint && (
               <div className="absolute right-0 top-full mt-2 pointer-events-none flex flex-col items-center select-none" style={{ transform: "translateX(50%)" }}>
                 <div className="w-px h-2 bg-orange-400"></div>
                 <div className="bg-orange-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap">
@@ -1089,7 +1083,7 @@ function DraggableTimelineLine({
               </div>
             )}
             
-            {pctLeft + pctWidth > 0 && pctLeft < 100 && (
+            {pctLeft + pctWidth > 0 && (
               <div 
                 className={cn(
                   "absolute flex flex-col items-center pointer-events-auto cursor-pointer active:opacity-60 hover:opacity-80 transition-opacity",
@@ -1098,7 +1092,7 @@ function DraggableTimelineLine({
                   editingRollIdx === i && "z-50 overflow-visible"
                 )}
                 style={{
-                  left: `${visibleCenterPct}%`,
+                  left: `50%`,
                   transform: 'translateX(-50%)',
                   touchAction: "pan-y"
                 }}
@@ -1364,14 +1358,16 @@ function DraggableTimelineLine({
           <React.Fragment key={"handle-" + i}>
             {isJoint && frontStartLeftPct >= -10 && (
               <div
-                className="absolute top-0 bottom-0 w-8 -ml-4 flex justify-center items-center z-10 pointer-events-none"
+                className="absolute top-0 bottom-0 w-px bg-yellow-400 z-10 pointer-events-none"
                 style={{ left: `${frontStartLeftPct}%` }}
               >
-                <div className="absolute -top-6 bg-blue-100 text-blue-900 text-[10px] font-bold px-1.5 py-0.5 rounded shadow border border-blue-400 transform -translate-x-1/2 left-1/2 flex items-center gap-1 whitespace-nowrap z-20">
-                  <MapPin size={12} className="text-blue-600 drop-shadow" />
-                  前端处理接头 {format(frontStartTime, "HH:mm")}
+                <div className="absolute bottom-full mb-0.5 transform -translate-x-1/2 left-1/2 flex flex-col items-center">
+                  <div className="bg-yellow-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm flex items-center gap-1 whitespace-nowrap">
+                    <Flag size={10} className="fill-current" />
+                    前端处理 {format(frontStartTime, "HH:mm")}
+                  </div>
+                  <div className="w-px h-1.5 bg-yellow-400"></div>
                 </div>
-                <div className="w-0.5 h-full bg-blue-500/80 shadow border-x border-white/50" />
               </div>
             )}
             
@@ -1408,10 +1404,13 @@ function DraggableTimelineLine({
               </div>
               <div className="absolute top-[110%] w-max bg-slate-800 text-white text-[10px] font-mono px-1.5 py-0.5 rounded shadow pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
                 {isJoint && <Flag size={10} fill="currentColor" className="text-red-400" />}
-                {format(nodeTime, "HH:mm")}
+                {nodeTime.getDate() !== shiftStart.getDate() ? format(nodeTime, "MM-dd HH:mm") : format(nodeTime, "HH:mm")}
               </div>
-              <div className="absolute top-[14px] bg-blue-50/90 text-blue-800 text-[9px] font-bold px-1 rounded pointer-events-none flex items-center gap-0.5">
-                {format(nodeTime, "HH:mm")}
+              <div className={cn("absolute top-[14px] border text-[9px] font-bold px-1.5 py-0.5 rounded pointer-events-none flex items-center gap-1 whitespace-nowrap shadow-sm",
+                isJoint ? "bg-orange-50/90 border-orange-200/50 text-orange-800" : "bg-blue-50/90 border-blue-200/50 text-blue-800"
+              )}>
+                <span className="font-mono">{nodeTime.getDate() !== shiftStart.getDate() ? format(nodeTime, "MM-dd HH:mm") : format(nodeTime, "HH:mm")}</span>
+                <span className="opacity-70 text-[8px]">{config.rolls[i].targetFormedLength.toFixed(1)}m</span>
               </div>
             </div>
           </React.Fragment>
@@ -1429,7 +1428,7 @@ export default function App() {
   const [simDateStr, setSimDateStr] = useState("");
   const [simTimeStr, setSimTimeStr] = useState("");
 
-  const [activePage, setActivePage] = useState<"dashboard" | "plan" | "admin" | "settings">("dashboard");
+  const [activePage, setActivePage] = useState<"dashboard" | "plan" | "admin" | "settings" | "daily_record">("dashboard");
 
   // -- Shift info --
   const shiftInfo = getShiftInfo(currentTime);
@@ -1797,9 +1796,22 @@ export default function App() {
     handleGeneratePlan(selectedLine, newConfigs);
   };
 
-  const handleSavePlan = () => {
-    setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 3000);
+  const handleSavePlan = async () => {
+    if (!user) return;
+    try {
+      const path = `users/${user.uid}/planSnapshots`;
+      await addDoc(collection(db, "users", user.uid, "planSnapshots"), {
+        userId: user.uid,
+        timestamp: serverTimestamp(),
+        lineConfigs: JSON.stringify(lineConfigs),
+        activeSplicing: JSON.stringify(activeSplicing),
+        lastWashes: JSON.stringify(lastWashes)
+      });
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
+    } catch (e) {
+      handleFirestoreError(e, OperationType.WRITE, `users/${user.uid}/planSnapshots`);
+    }
   };
 
   // Form - Unroll
@@ -2210,6 +2222,17 @@ export default function App() {
               )}
             >
               <Settings2 size={16} /> 设置
+            </button>
+            <button 
+              onClick={() => { setActivePage("daily_record"); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
+                activePage === "daily_record"
+                  ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
+                  : "hover:bg-slate-800 text-slate-300 hover:text-white",
+              )}
+            >
+              <Calculator size={16} /> 当天独立数据记录
             </button>
             <button className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-slate-800 text-slate-300 hover:text-white rounded-lg text-[13px] font-semibold transition-all">
               <Activity size={16} /> 接头动态追踪
@@ -3038,22 +3061,14 @@ export default function App() {
                           const shiftStart = getCurrentShiftStart(currentTime);
                           const shiftEnd = getCurrentShiftEnd(currentTime);
                           const maxMinutes = differenceInMinutes(shiftEnd, shiftStart);
-                          let foundNextShift = false;
 
-                          const itemsToRender = computed.filter((r) => {
-                            if (foundNextShift) return false;
-                            if (r.endTime.getTime() > shiftEnd.getTime()) {
-                              foundNextShift = true; // render this one, drop the rest
-                            }
-                            return true;
-                          });
+                          const itemsToRender = computed;
 
                           return (
                             <>
                               <div className="flex justify-between items-center px-1">
                                 <span className="text-xs font-bold text-slate-400">
-                                  规划结果 (显示 {itemsToRender.length}/
-                                  {computed.length} 卷)
+                                  规划结果 (显示全部 {computed.length} 卷)
                                 </span>
                                 <span
                                   className={cn(
@@ -3599,7 +3614,15 @@ export default function App() {
                   <span className="font-bold text-sm">主页</span>
               </button>
             </div>
-            <AdminDashboard />
+            <AdminDashboard
+              onLoadSnapshot={(configs, splicing, washes) => {
+                if (configs) setLineConfigs(configs);
+                if (splicing) setActiveSplicing(splicing);
+                if (washes) setLastWashes(washes);
+                setIsPlanningMode(true);
+                setActivePage("plan");
+              }}
+            />
           </div>
         ) : activePage === "plan" ? (
           <div className="bg-white rounded-none sm:rounded-3xl p-4 sm:p-6 xl:p-8 sm:shadow-sm sm:border border-slate-100 flex-1 flex flex-col overflow-auto h-full">
@@ -3615,9 +3638,14 @@ export default function App() {
                 <div className="w-10 h-10 shrink-0 bg-blue-100 rounded-xl flex items-center justify-center text-blue-600 hidden sm:flex">
                   <ListTodo size={20} />
                 </div>
-                <h2 className="text-xl sm:text-2xl font-black text-slate-800 leading-tight">
-                  分卷计划图表与编辑
-                </h2>
+                <div className="flex flex-col">
+                  <h2 className="text-xl sm:text-2xl font-black text-slate-800 leading-tight">
+                    分卷计划图表与编辑
+                  </h2>
+                  <div className="text-sm font-bold text-slate-500 mt-0.5">
+                    {format(getCurrentShiftStart(currentTime), "yyyy年MM月dd日")} · {getShiftInfo(getCurrentShiftStart(currentTime)).name} ({getShiftInfo(getCurrentShiftStart(currentTime)).timeStr})
+                  </div>
+                </div>
               </div>
               <div className="text-xs sm:text-sm text-slate-500 flex items-center gap-2">
                 <span className="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full bg-blue-500 animate-pulse shrink-0"></span>
@@ -3641,6 +3669,8 @@ export default function App() {
               />
             </div>
           </div>
+        ) : activePage === "daily_record" ? (
+          <DailyRecordPage setActivePage={setActivePage} />
         ) : activePage === "settings" ? (
           <SettingsPage 
             updatedSplicingTasks={updatedSplicingTasks}

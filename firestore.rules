@@ -31,6 +31,16 @@ service cloud.firestore {
              data.updatedAt == request.time;
     }
 
+    function isValidPlanSnapshot(data, userId) {
+      return data.keys().hasAll(['userId', 'timestamp', 'lineConfigs', 'activeSplicing', 'lastWashes']) &&
+             data.keys().size() == 5 &&
+             data.userId == userId &&
+             data.timestamp is timestamp &&
+             data.lineConfigs is string &&
+             data.activeSplicing is string &&
+             data.lastWashes is string;
+    }
+
     match /users/{userId}/punchRecords/{dateKey} {
       allow get: if isOwner(userId) && isValidId(dateKey);
       allow list: if isOwner(userId) && resource.data.userId == userId;
@@ -45,6 +55,12 @@ service cloud.firestore {
       allow create: if isOwner(userId) && isValidId(dateKey) && isValidLineState(incoming(), userId);
       allow update: if isOwner(userId) && isValidId(dateKey) && isValidLineState(incoming(), userId) &&
                     incoming().diff(existing()).affectedKeys().hasOnly(['lineConfigs', 'activeSplicing', 'lastWashes', 'updatedAt']);
+    }
+    match /users/{userId}/planSnapshots/{snapshotId} {
+      allow get: if isOwner(userId) && isValidId(snapshotId);
+      allow list: if isOwner(userId) && resource.data.userId == userId;
+      allow create: if isOwner(userId) && isValidId(snapshotId) && isValidPlanSnapshot(incoming(), userId);
+      allow delete: if isOwner(userId) && isValidId(snapshotId);
     }
   }
 }
