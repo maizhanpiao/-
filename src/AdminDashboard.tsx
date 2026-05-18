@@ -18,7 +18,7 @@ export default function AdminDashboard({ onLoadSnapshot }: { onLoadSnapshot?: (c
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    if (username === "admin" && password === "123456") {
+    if (username === "admin" && password === "admin12345") {
       setIsAdminAuth(true);
       localStorage.setItem("adminAuth", "true");
       setLoginError("");

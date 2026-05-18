@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import AdminDashboard from "./AdminDashboard";
 import { SettingsPage } from "./SettingsPage";
 import { useAuth } from "./AuthContext";
@@ -265,8 +265,191 @@ function getRelevantShifts(now: Date) {
 }
 
 // --- Mock Initial State ---
-const LINES = ["24", "25", "26"] as const;
-type LineId = (typeof LINES)[number];
+type LineId = string;
+
+interface AssignedLine {
+  id: string;
+  speed: number;
+}
+
+interface AppAccount {
+  username: string;
+  password: string;
+  role: "admin" | "user";
+  lines: AssignedLine[];
+}
+
+const DEFAULT_LINE_ASSIGNMENTS: AssignedLine[] = [
+  { id: "24", speed: 1.35 },
+  { id: "25", speed: 1.30 },
+  { id: "26", speed: 1.38 },
+];
+
+const ACCOUNT_STORAGE_KEY = "foil_app_accounts";
+const SESSION_STORAGE_KEY = "foil_app_session_user";
+const LOCAL_LINE_STATE_PREFIX = "foil_app_line_state";
+const DAILY_RECORD_PREFIX = "daily_records_data";
+const LOCAL_RETENTION_DAYS = 14;
+
+function normalizeLines(lines?: AssignedLine[]) {
+  const source = lines && lines.length > 0 ? lines : DEFAULT_LINE_ASSIGNMENTS;
+  const normalized = source.slice(0, 3).map((line, idx) => ({
+    id: String(line.id || DEFAULT_LINE_ASSIGNMENTS[idx]?.id || `${idx + 1}`).trim(),
+    speed: Number(line.speed) > 0 ? Number(line.speed) : DEFAULT_LINE_ASSIGNMENTS[idx]?.speed || 1.3,
+  }));
+  while (normalized.length < 3) {
+    const fallback = DEFAULT_LINE_ASSIGNMENTS[normalized.length];
+    normalized.push({ id: fallback.id, speed: fallback.speed });
+  }
+  return normalized;
+}
+
+function normalizeAccounts(rawAccounts: AppAccount[]): AppAccount[] {
+  const accounts: AppAccount[] = rawAccounts.map((account) => ({
+    ...account,
+    role: (account.role === "admin" ? "admin" : "user") as "admin" | "user",
+    lines: normalizeLines(account.lines),
+  }));
+  const adminIndex = accounts.findIndex((account) => account.username === "admin");
+  if (adminIndex >= 0) {
+    accounts[adminIndex] = {
+      ...accounts[adminIndex],
+      password: "admin12345",
+      role: "admin",
+      lines: normalizeLines(accounts[adminIndex].lines),
+    };
+  } else {
+    accounts.unshift({
+      username: "admin",
+      password: "admin12345",
+      role: "admin",
+      lines: normalizeLines(DEFAULT_LINE_ASSIGNMENTS),
+    });
+  }
+  return accounts;
+}
+
+function loadAccounts() {
+  try {
+    const saved = localStorage.getItem(ACCOUNT_STORAGE_KEY);
+    const parsed = saved ? JSON.parse(saved) : [];
+    const accounts = normalizeAccounts(Array.isArray(parsed) ? parsed : []);
+    localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(accounts));
+    return accounts;
+  } catch {
+    const accounts = normalizeAccounts([]);
+    localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(accounts));
+    return accounts;
+  }
+}
+
+function getDefaultLineConfig(speed: number): LinePlanConfig {
+  return {
+    cTotal: 0,
+    cUsed: 0,
+    cPrevUsed: 0,
+    fProduced: 0,
+    fPrevProduced: 0,
+    batchNo: "",
+    speed,
+    futureRolls: [],
+    rolls: [],
+    completedRolls: [],
+  };
+}
+
+function createLineConfigMap(lines: AssignedLine[]) {
+  return normalizeLines(lines).reduce<Record<LineId, LinePlanConfig>>((acc, line) => {
+    acc[line.id] = getDefaultLineConfig(line.speed);
+    return acc;
+  }, {});
+}
+
+function createLineDateMap<T>(lines: AssignedLine[], value: T) {
+  return normalizeLines(lines).reduce<Record<LineId, T>>((acc, line) => {
+    acc[line.id] = value;
+    return acc;
+  }, {});
+}
+
+function mergeLineConfigs(
+  prev: Record<LineId, LinePlanConfig>,
+  lines: AssignedLine[],
+) {
+  return normalizeLines(lines).reduce<Record<LineId, LinePlanConfig>>((acc, line) => {
+    acc[line.id] = prev[line.id]
+      ? { ...prev[line.id], speed: Number(prev[line.id].speed) || line.speed }
+      : getDefaultLineConfig(line.speed);
+    return acc;
+  }, {});
+}
+
+function getLocalLineStateKey(username: string, dateKey: string) {
+  return `${LOCAL_LINE_STATE_PREFIX}:${username}:${dateKey}`;
+}
+
+function getDailyRecordStorageKey(username: string, dateKey: string) {
+  return `${DAILY_RECORD_PREFIX}_${username}_${dateKey}`;
+}
+
+function pruneLocalStorageByDatePrefix(prefix: string, currentDateKey: string) {
+  const currentTime = new Date(`${currentDateKey}T00:00:00`).getTime();
+  if (!Number.isFinite(currentTime)) return;
+  const maxAgeMs = (LOCAL_RETENTION_DAYS - 1) * 24 * 60 * 60 * 1000;
+
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const key = localStorage.key(i);
+    if (!key || !key.startsWith(prefix)) continue;
+    const dateKey = key.slice(prefix.length);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) continue;
+    const savedTime = new Date(`${dateKey}T00:00:00`).getTime();
+    if (Number.isFinite(savedTime) && currentTime - savedTime > maxAgeMs) {
+      localStorage.removeItem(key);
+    }
+  }
+}
+
+function reviveDateMap(
+  raw: Record<LineId, string | Date | null> | undefined,
+  lines: AssignedLine[],
+) {
+  const defaults = createLineDateMap<Date | null>(lines, null);
+  if (!raw) return defaults;
+  return normalizeLines(lines).reduce<Record<LineId, Date | null>>((acc, line) => {
+    const value = raw[line.id];
+    acc[line.id] = value ? new Date(value) : null;
+    return acc;
+  }, defaults);
+}
+
+function reviveSplicingTasks(raw: any): SplicingTask[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((task) => ({
+    ...task,
+    startTime: task.startTime ? new Date(task.startTime) : new Date(),
+  }));
+}
+
+function reviveLocalLineState(
+  raw: string | null,
+  lines: AssignedLine[],
+) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      lineConfigs: mergeLineConfigs(parsed.lineConfigs || {}, lines),
+      activeSplicing: reviveSplicingTasks(parsed.activeSplicing),
+      lastWashes: reviveDateMap(parsed.lastWashes, lines),
+      punchRecords: parsed.punchRecords && typeof parsed.punchRecords === "object"
+        ? parsed.punchRecords
+        : {},
+    };
+  } catch (error) {
+    console.error("Failed to restore local line state", error);
+    return null;
+  }
+}
 
 // 预留一些占位工艺段名称
 const STAGES = ["预留入口", "预处理", "A段化成", "B段化成", "收尾预留"];
@@ -295,6 +478,7 @@ interface CompletedRoll {
   batchNo: string;
   corrosionBatchNo?: string;
   length: number;
+  corrosionConsumed?: number;
   unrollTime: string;
   isManual?: boolean;
 }
@@ -326,10 +510,93 @@ interface WashLog {
   duration: number;
 }
 
+function getCurrentCorrosionRemaining(config: LinePlanConfig) {
+  return Math.max(0, Number(config.cTotal || 0) - Number(config.cUsed || 0));
+}
+
+function getQueuedCorrosionLength(config: LinePlanConfig) {
+  return (config.futureRolls || []).reduce(
+    (sum, roll) => sum + (Number(roll.length) || 0),
+    0,
+  );
+}
+
+function getPlannedCorrosionDemand(config: LinePlanConfig) {
+  return getCurrentCorrosionRemaining(config) + getQueuedCorrosionLength(config);
+}
+
+function getFirstRollCarryIn(config: LinePlanConfig) {
+  return getCurrentCorrosionRemaining(config) > 0 ? Number(config.fProduced || 0) : 0;
+}
+
+function getRollCorrosionConsumed(
+  roll: PlannedRoll,
+  index: number,
+  config: LinePlanConfig,
+) {
+  const carryIn = index === 0 ? getFirstRollCarryIn(config) : 0;
+  return Math.max(0, Number(roll.targetFormedLength || 0) - carryIn);
+}
+
+function getCompletedRollCorrosionConsumed(roll: CompletedRoll) {
+  return Number(roll.corrosionConsumed ?? roll.length) || 0;
+}
+
+function getManualCompletedRolls(rolls: CompletedRoll[] = []) {
+  return rolls.filter((roll) => roll.isManual);
+}
+
+function getManualUnloadedLength(rolls: CompletedRoll[] = []) {
+  const manualRolls = getManualCompletedRolls(rolls);
+  return manualRolls
+    .slice(0, -1)
+    .reduce((sum, roll) => sum + (Number(roll.length) || 0), 0);
+}
+
+function getManualInProgressLength(rolls: CompletedRoll[] = []) {
+  const manualRolls = getManualCompletedRolls(rolls);
+  const lastRoll = manualRolls[manualRolls.length - 1];
+  return lastRoll ? Number(lastRoll.length) || 0 : 0;
+}
+
+function getManualCarryInLength(rolls: CompletedRoll[] = []) {
+  return getManualCompletedRolls(rolls).reduce(
+    (sum, roll) => sum + (Number(roll.length) || 0),
+    0,
+  );
+}
+
+function getUnloadedCompletedRolls(rolls: CompletedRoll[] = []) {
+  const manualRolls = getManualCompletedRolls(rolls);
+  const inProgressManualId = manualRolls[manualRolls.length - 1]?.id;
+  return rolls.filter((roll) => !(roll.isManual && roll.id === inProgressManualId));
+}
+
+function applyCompletedRollAccounting(
+  config: LinePlanConfig,
+  completedRolls: CompletedRoll[],
+) {
+  const manualCarryIn = getManualCarryInLength(completedRolls);
+  const inProgressLength = getManualInProgressLength(completedRolls);
+  const producedThisShift = completedRolls
+    .filter((roll) => !roll.isManual)
+    .reduce((sum, roll) => sum + getCompletedRollCorrosionConsumed(roll), 0);
+
+  return {
+    ...config,
+    completedRolls,
+    cPrevUsed: manualCarryIn,
+    cUsed: manualCarryIn + producedThisShift,
+    fPrevProduced: inProgressLength,
+    fProduced: inProgressLength,
+  };
+}
+
 function CombinedPlanTimeline({
   lineConfigs,
   updateConfig,
   currentTime,
+  lines,
   isPlanningMode,
   rollCompletionInputs,
   setRollCompletionInputs,
@@ -340,6 +607,7 @@ function CombinedPlanTimeline({
   lineConfigs: Record<LineId, LinePlanConfig>;
   updateConfig: (id: LineId, c: LinePlanConfig) => void;
   currentTime: Date;
+  lines: LineId[];
   isPlanningMode: boolean;
   rollCompletionInputs: Record<LineId, string>;
   setRollCompletionInputs: React.Dispatch<React.SetStateAction<Record<LineId, string>>>;
@@ -347,8 +615,6 @@ function CombinedPlanTimeline({
   setRollCompletionTimeInputs: React.Dispatch<React.SetStateAction<Record<LineId, string>>>;
   handleCompleteRoll: (lineId: LineId) => void;
 }) {
-  const lines = ["24", "25", "26"] as LineId[];
-
   // Calculate 12-hour shift window
   const shiftStart = getCurrentShiftStart(currentTime);
   const shiftEnd = getCurrentShiftEnd(currentTime);
@@ -433,14 +699,11 @@ function CombinedPlanTimeline({
 
           <div className="mt-8 space-y-5 relative z-10 w-full px-4">
 
-          {lines.map((lineId) => {
-            const config = lineConfigs[lineId];
-            let totalToForm = config.fProduced + config.cTotal - config.cUsed;
-            if (config.futureRolls) {
-              totalToForm += config.futureRolls.reduce((a, r) => a + r.length, 0);
-            }
-            const minL = lineId === "25" ? 300 : 400;
-            const maxL = lineId === "25" ? 800 : 550;
+        {lines.map((lineId) => {
+          const config = lineConfigs[lineId];
+          const totalToForm = getFirstRollCarryIn(config) + getPlannedCorrosionDemand(config);
+          const minL = lineId === "25" ? 300 : 400;
+          const maxL = lineId === "25" ? 800 : 550;
 
             const cumSum: number[] = [];
             let acc = 0;
@@ -498,7 +761,7 @@ function CombinedPlanTimeline({
 
                     // Add completed rolls first if not in planning mode
                     if (!isPlanningMode && config.completedRolls) {
-                      config.completedRolls.forEach((cr, i) => {
+                      getUnloadedCompletedRolls(config.completedRolls).forEach((cr, i) => {
                         const batchNo = cr.corrosionBatchNo || "无批号";
                         if (!currentGroup || currentGroup.batchNumber !== batchNo) {
                           if (currentGroup) groups.push(currentGroup);
@@ -520,7 +783,7 @@ function CombinedPlanTimeline({
 
                     let accC = 0;
                     config.rolls.forEach((roll, i) => {
-                      const cConsum = i === 0 ? Math.max(0, roll.targetFormedLength - config.fProduced) : roll.targetFormedLength;
+                      const cConsum = getRollCorrosionConsumed(roll, i, config);
                       accC += cConsum;
                       const endT = new Date(currentTime.getTime() + (accC / config.speed) * 60000);
                       
@@ -592,12 +855,14 @@ function CombinedPlanTimeline({
                                     <span className={cn("text-sm font-black flex flex-col items-end", roll.isCompleted ? "text-slate-500" : "text-blue-600")}>
                                       <span>{roll.isCompleted ? roll.actualLength?.toFixed(1) : roll.targetFormedLength.toFixed(1)} m</span>
                                       {!roll.isCompleted && (() => {
-                                         const isFirst = roll.index === 0 && lineConfigs[lineId].fProduced > 0;
-                                         const fProd = isFirst ? lineConfigs[lineId].fProduced : 0;
+                                         const fProd = getRollCorrosionConsumed(roll, roll.index, config) < roll.targetFormedLength
+                                           ? roll.targetFormedLength - getRollCorrosionConsumed(roll, roll.index, config)
+                                           : 0;
+                                         const isFirst = fProd > 0;
                                          const endMs = roll.endT ? roll.endT.getTime() : 0;
                                          const shiftEndMs = shiftEnd.getTime();
                                          const spillMins = (endMs - shiftEndMs) / 60000;
-                                         const cConsum = isFirst ? Math.max(0, roll.targetFormedLength - fProd) : roll.targetFormedLength;
+                                         const cConsum = getRollCorrosionConsumed(roll, roll.index, config);
                                          const spillLength = Math.max(0, spillMins * config.speed);
                                          const nextShiftLength = Math.min(cConsum, spillLength);
                                          const thisShiftLength = cConsum - nextShiftLength;
@@ -714,8 +979,9 @@ function FoilProgressBar({
     const handleMove = (e: PointerEvent) => {
       if (!draggingHandle || !barRef.current) return;
       const rect = barRef.current.getBoundingClientRect();
+      const dragWidth = rect.width * 2;
       let x = e.clientX - rect.left;
-      x = Math.max(0, Math.min(rect.width, x));
+      x = Math.max(0, Math.min(dragWidth, x));
       const val = Math.round((x / rect.width) * total);
 
       if (draggingHandle === "prev") {
@@ -946,18 +1212,19 @@ function DraggableTimelineLine({
       const cursorMinutesFromStart = (x / rect.width) * maxMinutes;
 
       // Convert time back to cumulative length
+      const firstCarryIn = getFirstRollCarryIn(config);
       const newCumulative =
         (cursorMinutesFromStart - currMinutesFromStart) * config.speed +
-        config.fProduced;
+        firstCarryIn;
 
       const prevH = draggingIdx === 0 ? 0 : cumSum[draggingIdx - 1];
       const nextH = cumSum[draggingIdx + 1];
 
       let leftMin = minL;
-      if (draggingIdx === 0) leftMin = Math.max(minL, config.fProduced);
+      if (draggingIdx === 0) leftMin = Math.max(minL, firstCarryIn);
 
-      let minAllowedPos = Math.max(prevH + leftMin, nextH - maxL);
-      let maxAllowedPos = Math.min(prevH + maxL, nextH - minL);
+      let minAllowedPos = prevH + leftMin;
+      let maxAllowedPos = nextH - minL;
 
       if (minAllowedPos > maxAllowedPos) {
         minAllowedPos = prevH + 50;
@@ -1012,7 +1279,7 @@ function DraggableTimelineLine({
       onClick={() => { setEditingRollIdx(null); setDeleteConfirmIdx(null); }}
     >
       {/* Render completed rolls first */}
-      {config.completedRolls?.map((cr: any, i: number) => {
+      {getUnloadedCompletedRolls(config.completedRolls || []).map((cr: any, i: number) => {
         const endTime = new Date(cr.unrollTime);
         const endMinutesFromStart = differenceInMinutes(endTime, shiftStart);
         const startMinutesFromStart = endMinutesFromStart - cr.length / config.speed;
@@ -1042,9 +1309,10 @@ function DraggableTimelineLine({
       {config.rolls.map((roll: any, i: number) => {
         const prevLength = i === 0 ? 0 : cumSum[i - 1];
         const currLength = prevLength + roll.targetFormedLength;
+        const firstCarryIn = getFirstRollCarryIn(config);
 
-        const startTimeFromNow = (prevLength - config.fProduced) / config.speed;
-        const endTimeFromNow = (currLength - config.fProduced) / config.speed;
+        const startTimeFromNow = (prevLength - firstCarryIn) / config.speed;
+        const endTimeFromNow = (currLength - firstCarryIn) / config.speed;
 
         const startMinutesFromShiftStart =
           currMinutesFromStart + startTimeFromNow;
@@ -1125,7 +1393,7 @@ function DraggableTimelineLine({
                           let val = parseFloat(editValue);
                           if (!isNaN(val) && val !== roll.targetFormedLength) {
                             let leftMin = minL;
-                            if (i === 0) leftMin = Math.max(minL, config.fProduced);
+                            if (i === 0) leftMin = Math.max(minL, getFirstRollCarryIn(config));
                             
                             let sum = 0;
                             let otherTarget = 0;
@@ -1146,14 +1414,14 @@ function DraggableTimelineLine({
                             }
                             
                             if (canBorrow) {
-                               const borrowMin = borrowIdx === 0 ? Math.max(minL, config.fProduced) : minL;
-                               const maxAllowed = Math.min(maxL, sum - borrowMin);
-                               const minAllowed = Math.max(leftMin, sum - maxL);
+                               const borrowMin = borrowIdx === 0 ? Math.max(minL, getFirstRollCarryIn(config)) : minL;
+                               const maxAllowed = sum - borrowMin;
+                               const minAllowed = leftMin;
                                
                                if (minAllowed <= maxAllowed) {
                                   val = Math.max(minAllowed, Math.min(maxAllowed, val));
                                } else {
-                                  val = Math.max(leftMin, Math.min(maxL, val));
+                                  val = Math.max(leftMin, val);
                                }
                                
                                const delta = val - roll.targetFormedLength;
@@ -1162,7 +1430,7 @@ function DraggableTimelineLine({
                                newRolls[borrowIdx] = { ...newRolls[borrowIdx], targetFormedLength: newRolls[borrowIdx].targetFormedLength - delta };
                                updateConfig(lineId, { ...config, rolls: newRolls });
                             } else {
-                               val = Math.max(leftMin, Math.min(maxL, val));
+                               val = Math.max(leftMin, val);
                                const newRolls = [...config.rolls];
                                newRolls[i] = { ...newRolls[i], targetFormedLength: val };
                                updateConfig(lineId, { ...config, rolls: newRolls });
@@ -1305,8 +1573,8 @@ function DraggableTimelineLine({
                         );
                       }
                       
-                      let inShift = roll.targetFormedLength;
-                      if (i === 0) inShift -= config.fProduced; // Subtract what's already produced
+                      const carryIn = i === 0 ? getFirstRollCarryIn(config) : 0;
+                      let inShift = roll.targetFormedLength - carryIn;
                       
                       if (endMinutesFromShiftStart > maxMinutes) {
                          const spillMins = endMinutesFromShiftStart - maxMinutes;
@@ -1320,7 +1588,7 @@ function DraggableTimelineLine({
                          );
                       }
                       
-                      if (i === 0 && config.fProduced > 0) {
+                      if (carryIn > 0) {
                          return (
                           <span className="text-[8px] sm:text-[9px] font-bold text-blue-800/60 leading-none mt-0.5 truncate">
                             (本班新产 {inShift.toFixed(1)}m)
@@ -1338,7 +1606,7 @@ function DraggableTimelineLine({
       })}
 
       {cumSum.slice(0, -1).map((h: number, i: number) => {
-        const minutesElapsed = (h - config.fProduced) / config.speed;
+        const minutesElapsed = (h - getFirstRollCarryIn(config)) / config.speed;
         const minutesFromShiftStart = currMinutesFromStart + minutesElapsed;
         const leftPct = (minutesFromShiftStart / maxMinutes) * 100;
         const nodeTime = addMinutes(currentTime, minutesElapsed);
@@ -1420,7 +1688,301 @@ function DraggableTimelineLine({
   );
 }
 
+function AppLoginScreen({
+  accounts,
+  onLogin,
+}: {
+  accounts: AppAccount[];
+  onLogin: (account: AppAccount) => void;
+}) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const account = accounts.find(
+      (item) => item.username === username.trim() && item.password === password,
+    );
+    if (!account) {
+      setError("账号或密码错误");
+      return;
+    }
+    setError("");
+    onLogin(account);
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-sm bg-white border border-slate-200 rounded-2xl shadow-xl p-6 space-y-4"
+      >
+        <div>
+          <h1 className="text-2xl font-black text-slate-900">智能箔材系统</h1>
+          <p className="text-sm font-bold text-slate-500 mt-1">请使用分配的应用账号登录</p>
+        </div>
+        <div>
+          <label className="text-xs font-bold text-slate-500 mb-1 block">账号</label>
+          <input
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+            autoFocus
+          />
+        </div>
+        <div>
+          <label className="text-xs font-bold text-slate-500 mb-1 block">密码</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+          />
+        </div>
+        {error && <div className="text-xs font-bold text-red-500">{error}</div>}
+        <button
+          type="submit"
+          className="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-lg py-2.5 text-sm font-black shadow-sm"
+        >
+          登录
+        </button>
+        <div className="text-[11px] text-slate-400 font-bold border-t border-slate-100 pt-3">
+          管理员默认账号: admin / admin12345
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function UserAssignmentPage({
+  accounts,
+  currentUsername,
+  onOpenMenu,
+  onLogout,
+  onAccountsChange,
+}: {
+  accounts: AppAccount[];
+  currentUsername: string;
+  onOpenMenu: () => void;
+  onLogout: () => void;
+  onAccountsChange: (accounts: AppAccount[]) => void;
+}) {
+  const [newUsername, setNewUsername] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newLines, setNewLines] = useState<AssignedLine[]>(normalizeLines(DEFAULT_LINE_ASSIGNMENTS));
+  const [message, setMessage] = useState("");
+
+  const saveAccounts = (nextAccounts: AppAccount[]) => {
+    const normalized = normalizeAccounts(nextAccounts);
+    localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(normalized));
+    onAccountsChange(normalized);
+  };
+
+  const updateAccount = (username: string, updater: (account: AppAccount) => AppAccount) => {
+    saveAccounts(accounts.map((account) => (
+      account.username === username ? updater(account) : account
+    )));
+  };
+
+  const createAccount = (e: React.FormEvent) => {
+    e.preventDefault();
+    const username = newUsername.trim();
+    if (!username || !newPassword) {
+      setMessage("请填写账号和密码");
+      return;
+    }
+    if (accounts.some((account) => account.username === username)) {
+      setMessage("账号已存在");
+      return;
+    }
+    saveAccounts([
+      ...accounts,
+      {
+        username,
+        password: newPassword,
+        role: "user",
+        lines: normalizeLines(newLines),
+      },
+    ]);
+    setNewUsername("");
+    setNewPassword("");
+    setNewLines(normalizeLines(DEFAULT_LINE_ASSIGNMENTS));
+    setMessage("新账号已创建");
+  };
+
+  const removeAccount = (username: string) => {
+    if (username === "admin" || username === currentUsername) return;
+    saveAccounts(accounts.filter((account) => account.username !== username));
+  };
+
+  return (
+    <div className="bg-slate-50 flex-1 overflow-auto p-4 sm:p-6 sm:rounded-3xl shadow-sm border border-slate-200">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-6">
+        <div className="flex gap-3">
+          <button
+            onClick={onOpenMenu}
+            className="lg:hidden p-2 -ml-2 text-slate-600 hover:bg-slate-200 rounded-lg transition-colors h-10"
+            type="button"
+          >
+            <Menu size={24} />
+          </button>
+          <div className="flex flex-col gap-1">
+            <h2 className="text-2xl font-black text-slate-800">用户分配</h2>
+            <p className="text-sm font-bold text-slate-500">
+              为每个账号分配生产线编号和默认车速，新账号下次登录后会按这里的配置初始化。
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={onLogout}
+          className="self-start bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg px-3 py-2 text-xs font-black"
+          type="button"
+        >
+          退出登录
+        </button>
+      </div>
+
+      <form onSubmit={createAccount} className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm mb-6">
+        <h3 className="font-black text-slate-800 mb-4">新建账号</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div>
+            <label className="text-xs font-bold text-slate-500 block mb-1">账号</label>
+            <input
+              value={newUsername}
+              onChange={(e) => setNewUsername(e.target.value)}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold outline-none focus:border-blue-500"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-bold text-slate-500 block mb-1">密码</label>
+            <input
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold outline-none focus:border-blue-500"
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 mb-4">
+          {newLines.map((line, index) => (
+            <div key={index} className="grid grid-cols-2 gap-2 bg-slate-50 border border-slate-200 rounded-xl p-3">
+              <div>
+                <label className="text-[10px] font-bold text-slate-400 block mb-1">生产线编号</label>
+                <input
+                  value={line.id}
+                  onChange={(e) => {
+                    const next = [...newLines];
+                    next[index] = { ...next[index], id: e.target.value };
+                    setNewLines(next);
+                  }}
+                  className="w-full border border-slate-200 rounded px-2 py-1.5 text-sm font-bold"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-bold text-slate-400 block mb-1">默认车速</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={line.speed}
+                  onChange={(e) => {
+                    const next = [...newLines];
+                    next[index] = { ...next[index], speed: Number(e.target.value) };
+                    setNewLines(next);
+                  }}
+                  className="w-full border border-slate-200 rounded px-2 py-1.5 text-sm font-bold"
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="flex items-center gap-3">
+          <button className="bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-4 py-2 text-sm font-black" type="submit">
+            新建账号
+          </button>
+          {message && <span className="text-xs font-bold text-slate-500">{message}</span>}
+        </div>
+      </form>
+
+      <div className="space-y-4">
+        {accounts.map((account) => (
+          <section key={account.username} className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+              <div>
+                <div className="font-black text-slate-800">
+                  {account.username}
+                  {account.role === "admin" && <span className="ml-2 text-[10px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full">管理员</span>}
+                </div>
+                <div className="text-xs font-bold text-slate-400">应用账号</div>
+              </div>
+              <button
+                onClick={() => removeAccount(account.username)}
+                disabled={account.username === "admin" || account.username === currentUsername}
+                className="text-xs font-bold text-red-500 disabled:text-slate-300 disabled:cursor-not-allowed"
+                type="button"
+              >
+                删除账号
+              </button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-[180px_1fr] gap-4">
+              <div>
+                <label className="text-xs font-bold text-slate-500 block mb-1">密码</label>
+                <input
+                  value={account.password}
+                  disabled={account.username === "admin"}
+                  onChange={(e) => updateAccount(account.username, (item) => ({ ...item, password: e.target.value }))}
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold outline-none focus:border-blue-500 disabled:bg-slate-50 disabled:text-slate-400"
+                />
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                {normalizeLines(account.lines).map((line, index) => (
+                  <div key={index} className="grid grid-cols-2 gap-2 bg-slate-50 border border-slate-200 rounded-xl p-3">
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 block mb-1">生产线编号</label>
+                      <input
+                        value={line.id}
+                        onChange={(e) => updateAccount(account.username, (item) => {
+                          const nextLines = normalizeLines(item.lines);
+                          nextLines[index] = { ...nextLines[index], id: e.target.value };
+                          return { ...item, lines: nextLines };
+                        })}
+                        className="w-full border border-slate-200 rounded px-2 py-1.5 text-sm font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 block mb-1">默认车速</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={line.speed}
+                        onChange={(e) => updateAccount(account.username, (item) => {
+                          const nextLines = normalizeLines(item.lines);
+                          nextLines[index] = { ...nextLines[index], speed: Number(e.target.value) };
+                          return { ...item, lines: nextLines };
+                        })}
+                        className="w-full border border-slate-200 rounded px-2 py-1.5 text-sm font-bold"
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  const [accounts, setAccounts] = useState<AppAccount[]>(() => loadAccounts());
+  const [appUser, setAppUser] = useState<AppAccount | null>(() => {
+    const savedUsername = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!savedUsername) return null;
+    return loadAccounts().find((account) => account.username === savedUsername) || null;
+  });
+  const lineAssignments = useMemo(() => normalizeLines(appUser?.lines), [appUser]);
+  const activeLines = useMemo(() => lineAssignments.map((line) => line.id), [lineAssignments]);
+
   const [timeOffset, setTimeOffset] = useState(0);
   const [isPlanningMode, setIsPlanningMode] = useState(true);
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -1428,7 +1990,7 @@ export default function App() {
   const [simDateStr, setSimDateStr] = useState("");
   const [simTimeStr, setSimTimeStr] = useState("");
 
-  const [activePage, setActivePage] = useState<"dashboard" | "plan" | "admin" | "settings" | "daily_record">("dashboard");
+  const [activePage, setActivePage] = useState<"dashboard" | "plan" | "admin" | "settings" | "daily_record" | "users">("dashboard");
 
   // -- Shift info --
   const shiftInfo = getShiftInfo(currentTime);
@@ -1522,27 +2084,21 @@ export default function App() {
 
   // -- active tasks state --
   const [activeSplicing, setActiveSplicing] = useState<SplicingTask[]>([]);
-  const [lastWashes, setLastWashes] = useState<Record<LineId, Date | null>>({
-    "24": null,
-    "25": null,
-    "26": null,
-  });
+  const [lastWashes, setLastWashes] = useState<Record<LineId, Date | null>>(() =>
+    createLineDateMap(lineAssignments, null),
+  );
 
   // -- line config states --
   const [lineConfigs, setLineConfigs] = useState<
     Record<LineId, LinePlanConfig>
-  >({
-    "24": { cTotal: 0, cUsed: 0, cPrevUsed: 0, fProduced: 0, fPrevProduced: 0, batchNo: "", speed: 1.35, futureRolls: [], rolls: [], completedRolls: [] },
-    "25": { cTotal: 0, cUsed: 0, cPrevUsed: 0, fProduced: 0, fPrevProduced: 0, batchNo: "", speed: 1.30, futureRolls: [], rolls: [], completedRolls: [] },
-    "26": { cTotal: 0, cUsed: 0, cPrevUsed: 0, fProduced: 0, fPrevProduced: 0, batchNo: "", speed: 1.38, futureRolls: [], rolls: [], completedRolls: [] }
-  });
+  >(() => createLineConfigMap(lineAssignments));
 
   // -- form states --
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<
     "plan" | "forecast" | "splicing" | "wash" | "unroll" | "observe"
   >("plan");
-  const [selectedLine, setSelectedLine] = useState<LineId>("24");
+  const [selectedLine, setSelectedLine] = useState<LineId>(activeLines[0]);
 
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState<{title: string, message: string, onConfirm: () => void} | null>(null);
@@ -1555,22 +2111,90 @@ export default function App() {
   const [forecastLengths, setForecastLengths] = useState<Record<string, string>>({});
   const [showOnlyJointPrep, setShowOnlyJointPrep] = useState(false);
   const [showCompletedRolls, setShowCompletedRolls] = useState(false);
-  const [rollCompletionInputs, setRollCompletionInputs] = useState<Record<LineId, string>>({
-    "24": "",
-    "25": "",
-    "26": "",
-  });
-  const [rollCompletionTimeInputs, setRollCompletionTimeInputs] = useState<Record<LineId, string>>({
-    "24": "",
-    "25": "",
-    "26": "",
-  });
+  const [rollCompletionInputs, setRollCompletionInputs] = useState<Record<LineId, string>>(() =>
+    createLineDateMap(lineAssignments, ""),
+  );
+  const [rollCompletionTimeInputs, setRollCompletionTimeInputs] = useState<Record<LineId, string>>(() =>
+    createLineDateMap(lineAssignments, ""),
+  );
   const [mealConfig, setMealConfig] = useState<MealConfig>({
     lunchStart: 11 + 35 / 60,
     lunchEnd: 12 + 15 / 60,
     dinnerStart: 17 + 10 / 60,
     dinnerEnd: 17 + 50 / 60,
   });
+  const localStateHydratedKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    setLineConfigs((prev) => mergeLineConfigs(prev, lineAssignments));
+    setLastWashes((prev) => ({
+      ...createLineDateMap(lineAssignments, null),
+      ...Object.fromEntries(
+        activeLines
+          .filter((line) => Object.prototype.hasOwnProperty.call(prev, line))
+          .map((line) => [line, prev[line]]),
+      ),
+    }));
+    setRollCompletionInputs((prev) => ({
+      ...createLineDateMap(lineAssignments, ""),
+      ...Object.fromEntries(
+        activeLines
+          .filter((line) => Object.prototype.hasOwnProperty.call(prev, line))
+          .map((line) => [line, prev[line]]),
+      ),
+    }));
+    setRollCompletionTimeInputs((prev) => ({
+      ...createLineDateMap(lineAssignments, ""),
+      ...Object.fromEntries(
+        activeLines
+          .filter((line) => Object.prototype.hasOwnProperty.call(prev, line))
+          .map((line) => [line, prev[line]]),
+      ),
+    }));
+    setSelectedLine((prev) => (activeLines.includes(prev) ? prev : activeLines[0]));
+  }, [activeLines, lineAssignments]);
+
+  useEffect(() => {
+    if (!appUser) return;
+    const storageKey = getLocalLineStateKey(appUser.username, dateKey);
+    pruneLocalStorageByDatePrefix(`${LOCAL_LINE_STATE_PREFIX}:${appUser.username}:`, dateKey);
+    pruneLocalStorageByDatePrefix(`${DAILY_RECORD_PREFIX}_${appUser.username}_`, dateKey);
+    localStateHydratedKeyRef.current = null;
+    const restored = reviveLocalLineState(localStorage.getItem(storageKey), lineAssignments);
+    if (restored) {
+      setLineConfigs(restored.lineConfigs);
+      setActiveSplicing(restored.activeSplicing);
+      setLastWashes(restored.lastWashes);
+      setPunchRecords(restored.punchRecords);
+    } else {
+      setLineConfigs((prev) => mergeLineConfigs(prev, lineAssignments));
+      setLastWashes((prev) => ({
+        ...createLineDateMap(lineAssignments, null),
+        ...Object.fromEntries(
+          activeLines
+            .filter((line) => Object.prototype.hasOwnProperty.call(prev, line))
+            .map((line) => [line, prev[line]]),
+        ),
+      }));
+    }
+    localStateHydratedKeyRef.current = storageKey;
+  }, [appUser, activeLines, dateKey, lineAssignments]);
+
+  useEffect(() => {
+    if (!appUser) return;
+    const storageKey = getLocalLineStateKey(appUser.username, dateKey);
+    if (localStateHydratedKeyRef.current !== storageKey) return;
+    const timer = setTimeout(() => {
+      localStorage.setItem(storageKey, JSON.stringify({
+        lineConfigs,
+        activeSplicing,
+        lastWashes,
+        punchRecords,
+        savedAt: new Date().toISOString(),
+      }));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [lineConfigs, activeSplicing, lastWashes, punchRecords, appUser, dateKey]);
 
   useEffect(() => {
     if (!user) return;
@@ -1604,8 +2228,11 @@ export default function App() {
           const data = docSnap.data();
           if (data.lineConfigs) {
             setLineConfigs(prev => {
+              const parsed = JSON.parse(data.lineConfigs);
+              const merged = mergeLineConfigs(parsed, lineAssignments);
               const currentStr = JSON.stringify(prev);
-              return currentStr !== data.lineConfigs ? JSON.parse(data.lineConfigs) : prev;
+              const nextStr = JSON.stringify(merged);
+              return currentStr !== nextStr ? merged : prev;
             });
           }
           if (data.activeSplicing) {
@@ -1628,7 +2255,7 @@ export default function App() {
       handleFirestoreError(error, OperationType.GET, path);
     });
     return () => unsub();
-  }, [user, dateKey]);
+  }, [user, dateKey, lineAssignments]);
 
   // debounce writes to firestore for lineState
   const firstRenderRef = useRef(true);
@@ -1711,6 +2338,8 @@ export default function App() {
         unrollDate.setDate(unrollDate.getDate() - 1);
       }
 
+      const carryIn = getFirstRollCarryIn(c);
+      const corrosionConsumed = Math.max(0, actualL - carryIn);
       const diff = actualL - currentRoll.targetFormedLength;
 
       const newRolls = [...c.rolls];
@@ -1733,10 +2362,14 @@ export default function App() {
         batchNo: currentRoll.formedBatchNo || "",
         corrosionBatchNo: currentRoll.batchNumber || "",
         length: actualL,
+        corrosionConsumed,
         unrollTime: unrollDate.toISOString(),
       });
 
-      const newMineUnrolled = completed.reduce((sum, cr) => sum + Number(cr.length), 0);
+      const newMineUnrolled = completed.reduce(
+        (sum, cr) => sum + (cr.isManual ? 0 : getCompletedRollCorrosionConsumed(cr)),
+        0,
+      );
       const minsSinceUnroll = Math.max(0, differenceInMinutes(currentTime, unrollDate));
       const newFProduced = minsSinceUnroll * c.speed;
 
@@ -1922,7 +2555,7 @@ export default function App() {
     currentLineConfigs = lineConfigs,
   ) => {
     const conf = currentLineConfigs[lineId];
-    let L = conf.cTotal - conf.cUsed;
+    let L = getCurrentCorrosionRemaining(conf);
     if (L <= 0 && (!conf.futureRolls || conf.futureRolls.length === 0)) return currentLineConfigs;
     const avg = lineId === "25" ? 550 : 475;
     const minL = lineId === "25" ? 300 : 400;
@@ -1932,17 +2565,11 @@ export default function App() {
 
     // Collect planned times from OTHER lines to encourage bundling
     const otherRollTimes: number[] = [];
-    LINES.forEach((l) => {
+    activeLines.forEach((l) => {
       if (l !== lineId) {
         let accC = 0;
         currentLineConfigs[l].rolls.forEach((r, i) => {
-          const cConsum =
-            i === 0
-              ? Math.max(
-                  0,
-                  r.targetFormedLength - currentLineConfigs[l].fProduced,
-                )
-              : r.targetFormedLength;
+          const cConsum = getRollCorrosionConsumed(r, i, currentLineConfigs[l]);
           accC += cConsum;
           const endT = new Date(
             currentTime.getTime() +
@@ -2110,7 +2737,7 @@ export default function App() {
   const handleGlobalGeneratePlan = () => {
     // Sequentially plan each line so they can bundle with previous ones
     let currentConfigs = { ...lineConfigs };
-    LINES.forEach((lineId) => {
+    activeLines.forEach((lineId) => {
       currentConfigs =
         handleGeneratePlan(lineId, currentConfigs) || currentConfigs;
     });
@@ -2122,10 +2749,7 @@ export default function App() {
     return config.rolls.map((roll, i) => {
       const startT =
         i === 0 ? currentTime : addMinutes(currentTime, accC / config.speed);
-      const cConsum =
-        i === 0
-          ? Math.max(0, roll.targetFormedLength - config.fProduced)
-          : roll.targetFormedLength;
+      const cConsum = getRollCorrosionConsumed(roll, i, config);
       accC += cConsum;
       const endT = addMinutes(currentTime, accC / config.speed);
       const meal = checkMealConflict(endT, mealConfig);
@@ -2145,6 +2769,55 @@ export default function App() {
     });
   };
 
+  const handleAppLogin = (account: AppAccount) => {
+    const normalizedAccount = {
+      ...account,
+      lines: normalizeLines(account.lines),
+    };
+    localStorage.setItem(SESSION_STORAGE_KEY, normalizedAccount.username);
+    setLineConfigs((prev) => mergeLineConfigs(prev, normalizedAccount.lines));
+    setLastWashes((prev) => ({
+      ...createLineDateMap(normalizedAccount.lines, null),
+      ...Object.fromEntries(
+        normalizedAccount.lines
+          .map((line) => line.id)
+          .filter((line) => Object.prototype.hasOwnProperty.call(prev, line))
+          .map((line) => [line, prev[line]]),
+      ),
+    }));
+    setRollCompletionInputs(createLineDateMap(normalizedAccount.lines, ""));
+    setRollCompletionTimeInputs(createLineDateMap(normalizedAccount.lines, ""));
+    setAppUser(normalizedAccount);
+    setSelectedLine(normalizedAccount.lines[0].id);
+    setActivePage(normalizedAccount.role === "admin" ? "users" : "dashboard");
+  };
+
+  const handleAppLogout = () => {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+    setAppUser(null);
+    setActivePage("dashboard");
+  };
+
+  const handleAccountsChange = (nextAccounts: AppAccount[]) => {
+    setAccounts(nextAccounts);
+    if (appUser) {
+      const updatedUser = nextAccounts.find((account) => account.username === appUser.username);
+      if (updatedUser) {
+        setAppUser(updatedUser);
+        setLineConfigs((prev) => mergeLineConfigs(prev, updatedUser.lines));
+        setSelectedLine((prev) => (
+          normalizeLines(updatedUser.lines).some((line) => line.id === prev)
+            ? prev
+            : normalizeLines(updatedUser.lines)[0].id
+        ));
+      }
+    }
+  };
+
+  if (!appUser) {
+    return <AppLoginScreen accounts={accounts} onLogin={handleAppLogin} />;
+  }
+
   return (
     <div className="flex h-screen w-full bg-slate-50 font-sans text-slate-800 overflow-hidden relative">
       {/* Mobile Sidebar Overlay */}
@@ -2163,11 +2836,9 @@ export default function App() {
         <div className="p-6 relative">
           <div className="flex items-center gap-3 mb-8">
 
-            {user ? (
-               <button onClick={logOut} className="mr-2 text-xs text-blue-200">登出 ({user.email})</button>
-            ) : (
-               <button onClick={signIn} className="mr-2 text-xs text-white bg-blue-600 px-2 py-1 rounded">登录以保存数据</button>
-            )}
+            <button onClick={handleAppLogout} className="mr-2 text-xs text-blue-200 text-left">
+              退出 {appUser.username}
+            </button>
             <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl flex items-center justify-center font-bold text-xl text-white shadow-lg shadow-blue-500/20">
               F
             </div>
@@ -2179,6 +2850,19 @@ export default function App() {
             <X size={20} />
           </button>
           <nav className="space-y-1.5">
+            {appUser.role === "admin" && (
+              <button
+                onClick={() => { setActivePage("users"); setIsMobileMenuOpen(false); }}
+                className={cn(
+                  "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
+                  activePage === "users"
+                    ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
+                    : "hover:bg-slate-800 text-slate-300 hover:text-white",
+                )}
+              >
+                <Database size={16} /> 用户分配
+              </button>
+            )}
             <button
               onClick={() => { setActivePage("dashboard"); setIsMobileMenuOpen(false); }}
               className={cn(
@@ -2265,12 +2949,26 @@ export default function App() {
               </p>
             </div>
           </div>
+          <button
+            onClick={user ? logOut : signIn}
+            className="mt-4 w-full text-[11px] font-bold text-slate-200 bg-slate-700 hover:bg-slate-600 rounded-lg px-3 py-2"
+          >
+            {user ? `退出云端保存 (${user.email})` : "登录 Google 保存数据"}
+          </button>
         </div>
       </aside>
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col p-4 md:p-6 overflow-hidden max-w-[1600px] w-full relative">
-        {activePage === "dashboard" ? (
+        {activePage === "users" ? (
+          <UserAssignmentPage
+            accounts={accounts}
+            currentUsername={appUser.username}
+            onOpenMenu={() => setIsMobileMenuOpen(true)}
+            onLogout={handleAppLogout}
+            onAccountsChange={handleAccountsChange}
+          />
+        ) : activePage === "dashboard" ? (
           <div className="flex flex-col h-full overflow-hidden w-full relative">
             {/* Punch Banner */}
             {punchAlert && (
@@ -2355,11 +3053,11 @@ export default function App() {
 
                       let allEvents: TimelineEvent[] = [];
 
-                      LINES.forEach(lineId => {
+                      activeLines.forEach(lineId => {
                         const mappedRolls = getComputedPlanForLine(lineId);
                         
                         if (!isPlanningMode) {
-                          const completedRolls = lineConfigs[lineId].completedRolls || [];
+                          const completedRolls = getUnloadedCompletedRolls(lineConfigs[lineId].completedRolls || []);
                           completedRolls.forEach(cr => {
                             const t = new Date(cr.unrollTime);
                             if (t.getTime() >= shiftS.getTime() && t.getTime() <= shiftE.getTime()) {
@@ -2507,7 +3205,7 @@ export default function App() {
                 <div className="p-3 border-b border-slate-800 shrink-0">
                   {/* Target Line Selector global for the terminal */}
                   <div className="bg-slate-950 p-1.5 rounded-xl flex gap-1">
-                    {LINES.map((line) => (
+                    {activeLines.map((line) => (
                       <button
                         key={line}
                         onClick={() => setSelectedLine(line)}
@@ -2650,15 +3348,11 @@ export default function App() {
                               total={lineConfigs[selectedLine].cTotal}
                               cPrev={lineConfigs[selectedLine].cPrevUsed || 0}
                               cPrevUnrolled={
-                                (() => {
-                                  const rolls = lineConfigs[selectedLine].completedRolls?.filter(cr => cr.isManual) || [];
-                                  if (rolls.length <= 1) return 0;
-                                  return rolls.slice(0, -1).reduce((acc, cr) => acc + (Number(cr.length) || 0), 0);
-                                })()
+                                getManualUnloadedLength(lineConfigs[selectedLine].completedRolls || [])
                               }
                               cMineUnrolled={
                                 lineConfigs[selectedLine].completedRolls?.filter(cr => !cr.isManual).reduce(
-                                  (acc, cr) => acc + (Number(cr.length) || 0),
+                                  (acc, cr) => acc + getCompletedRollCorrosionConsumed(cr),
                                   0
                                 ) || 0
                               }
@@ -2775,18 +3469,21 @@ export default function App() {
                               </span>
                               手动录入已产化成箔
                               <span className="bg-slate-800 text-[10px] px-1.5 py-0.5 rounded-full text-slate-300">
-                                {lineConfigs[selectedLine].completedRolls
-                                  ?.length || 0}{" "}
+                                {getManualCompletedRolls(lineConfigs[selectedLine].completedRolls || [])
+                                  .length || 0}{" "}
                                 卷
                               </span>
                             </button>
 
                             {showCompletedRolls && (
                               <div className="mt-2 pl-[18px] border-l-2 border-slate-700/50 mb-4 animate-in fade-in slide-in-from-top-1">
+                                <div className="text-[10px] text-amber-300 bg-amber-950/30 border border-amber-500/20 rounded-lg px-3 py-2 mb-2 font-bold">
+                                  最后一条米数视为仍在生产线上的当前卷，不会按已卸卷处理。
+                                </div>
                                 <div className="space-y-2">
                                   {lineConfigs[
                                     selectedLine
-                                  ].completedRolls?.map((cr) => (
+                                  ].completedRolls?.filter(cr => cr.isManual).map((cr) => (
                                     <div
                                       key={cr.id}
                                       className="flex gap-3 text-xs bg-slate-800/40 rounded px-2 py-1.5 items-center border border-slate-700/30"
@@ -2825,18 +3522,8 @@ export default function App() {
                                               const updatedRolls = p[selectedLine].completedRolls!.map((x) =>
                                                 x.id === cr.id ? { ...x, length: Number(e.target.value) } : x
                                               );
-                                              const newSum = updatedRolls.reduce((sum, r) => sum + (Number(r.length) || 0), 0);
-                                              const lastLength = updatedRolls.length > 0 ? (Number(updatedRolls[updatedRolls.length - 1].length) || 0) : 0;
-                                              const fProducedDiff = lastLength - (p[selectedLine].fPrevProduced || 0);
                                               
-                                              newConfig[selectedLine] = {
-                                                ...p[selectedLine],
-                                                completedRolls: updatedRolls,
-                                                cPrevUsed: newSum,
-                                                cUsed: Math.max(p[selectedLine].cUsed, newSum),
-                                                fPrevProduced: lastLength,
-                                                fProduced: Math.max(0, p[selectedLine].fProduced + fProducedDiff)
-                                              };
+                                              newConfig[selectedLine] = applyCompletedRollAccounting(p[selectedLine], updatedRolls);
                                               return newConfig;
                                             })
                                           }
@@ -2883,17 +3570,8 @@ export default function App() {
                                           setLineConfigs((p) => {
                                             const newConfig = { ...p };
                                             const updatedRolls = p[selectedLine].completedRolls!.filter((x) => x.id !== cr.id);
-                                            const newSum = updatedRolls.reduce((sum, r) => sum + (Number(r.length) || 0), 0);
-                                            const lastLength = updatedRolls.length > 0 ? (Number(updatedRolls[updatedRolls.length - 1].length) || 0) : 0;
-                                            const fProducedDiff = lastLength - (p[selectedLine].fPrevProduced || 0);
 
-                                            newConfig[selectedLine] = {
-                                              ...p[selectedLine],
-                                              completedRolls: updatedRolls,
-                                              cPrevUsed: newSum,
-                                              fPrevProduced: lastLength,
-                                              fProduced: Math.max(0, p[selectedLine].fProduced + fProducedDiff)
-                                            };
+                                            newConfig[selectedLine] = applyCompletedRollAccounting(p[selectedLine], updatedRolls);
                                             return newConfig;
                                           })
                                         }
@@ -2918,18 +3596,8 @@ export default function App() {
                                           isManual: true,
                                         },
                                       ];
-                                      
-                                      const newSum = updatedRolls.reduce((sum, r) => sum + (Number(r.length) || 0), 0);
-                                      const lastLength = updatedRolls.length > 0 ? (Number(updatedRolls[updatedRolls.length - 1].length) || 0) : 0;
-                                      const fProducedDiff = lastLength - (p[selectedLine].fPrevProduced || 0);
 
-                                      newConfig[selectedLine] = {
-                                        ...p[selectedLine],
-                                        completedRolls: updatedRolls,
-                                        cPrevUsed: newSum,
-                                        fPrevProduced: lastLength,
-                                        fProduced: Math.max(0, p[selectedLine].fProduced + fProducedDiff)
-                                      };
+                                      newConfig[selectedLine] = applyCompletedRollAccounting(p[selectedLine], updatedRolls);
                                       return newConfig;
                                     });
                                   }}
@@ -2938,9 +3606,8 @@ export default function App() {
                                   <Plus size={12} /> 添加化成箔记录
                                 </button>
 
-                                {(!lineConfigs[selectedLine].completedRolls ||
-                                  lineConfigs[selectedLine].completedRolls!
-                                    .length === 0) && (
+                                {getManualCompletedRolls(lineConfigs[selectedLine].completedRolls || [])
+                                  .length === 0 && (
                                   <div className="mt-2 text-xs text-slate-500 italic pb-1">
                                     暂无记录，点击上方添加。
                                   </div>
@@ -3047,9 +3714,7 @@ export default function App() {
                       <div className="space-y-3">
                         {(() => {
                           const computed = getComputedPlanForLine(selectedLine);
-                          const totalReq =
-                            lineConfigs[selectedLine].cTotal -
-                            lineConfigs[selectedLine].cUsed;
+                          const totalReq = getPlannedCorrosionDemand(lineConfigs[selectedLine]);
                           const totalTarget = computed.reduce(
                             (acc, r) => acc + r.corrosionConsumed,
                             0,
@@ -3118,9 +3783,9 @@ export default function App() {
                                           <span className="text-xs font-bold text-slate-200">
                                             目标化成箔长度
                                           </span>
-                                          {i === 0 && lineConfigs[selectedLine].fProduced > 0 && (
+                                          {i === 0 && getFirstRollCarryIn(lineConfigs[selectedLine]) > 0 && (
                                             <span className="text-[10px] text-slate-400 mt-0.5">
-                                              含接班已收 {lineConfigs[selectedLine].fProduced.toFixed(1)}m
+                                              含接班已收 {getFirstRollCarryIn(lineConfigs[selectedLine]).toFixed(1)}m
                                             </span>
                                           )}
                                           {r.endTime && differenceInMinutes(r.endTime, shiftStart) > maxMinutes && (
@@ -3255,10 +3920,7 @@ export default function App() {
                           {(() => {
                             const lineId = selectedLine;
                             const conf = lineConfigs[lineId];
-                            const currentRem = Math.max(
-                              0,
-                              conf.cTotal - conf.cUsed,
-                            );
+                            const currentRem = getCurrentCorrosionRemaining(conf);
                             let accMins = currentRem / conf.speed;
                             const machineLen = 240;
 
@@ -3660,6 +4322,7 @@ export default function App() {
                   setLineConfigs((prev) => ({ ...prev, [id]: c }))
                 }
                 currentTime={currentTime}
+                lines={activeLines}
                 isPlanningMode={isPlanningMode}
                 rollCompletionInputs={rollCompletionInputs}
                 setRollCompletionInputs={setRollCompletionInputs}
@@ -3670,13 +4333,20 @@ export default function App() {
             </div>
           </div>
         ) : activePage === "daily_record" ? (
-          <DailyRecordPage setActivePage={setActivePage} />
+          <DailyRecordPage
+            setActivePage={setActivePage}
+            lines={activeLines}
+            defaultSpeeds={Object.fromEntries(
+              activeLines.map((line) => [line, lineConfigs[line]?.speed || 0]),
+            )}
+            storageKey={getDailyRecordStorageKey(appUser.username, dateKey)}
+          />
         ) : activePage === "settings" ? (
           <SettingsPage 
             updatedSplicingTasks={updatedSplicingTasks}
             lastWashes={lastWashes}
             currentTime={currentTime}
-            LINES={LINES}
+            LINES={activeLines}
             setActivePage={setActivePage}
             handleOpenSimulator={handleOpenSimulator}
             timeOffset={timeOffset}

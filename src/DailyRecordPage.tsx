@@ -2,12 +2,11 @@ import React, { useState, useEffect } from "react";
 import { Plus, Trash2, ChevronLeft, Save, Calculator, Divide } from "lucide-react";
 import { cn } from "./lib/utils";
 
-const LINES = ["24", "25", "26"];
-
 type RollRecord = {
   id: string;
   batchNo: string;
   length: number | "";
+  previousLength?: number | "";
   startTime: string;
   splitTime: string;
   isLastRoll: boolean; // 如果是下班前最后一卷，不分卷/不卸卷
@@ -15,65 +14,113 @@ type RollRecord = {
   currentLength: number | ""; // 当前米数(m)
 };
 
+function createEmptyRecords(lines: string[]) {
+  return lines.reduce<Record<string, RollRecord[]>>((acc, line) => {
+    acc[line] = [];
+    return acc;
+  }, {});
+}
+
 export default function DailyRecordPage({
   setActivePage,
+  lines,
+  defaultSpeeds = {},
+  storageKey = "daily_records_data",
 }: {
   setActivePage: (page: any) => void;
+  lines: string[];
+  defaultSpeeds?: Record<string, number>;
+  storageKey?: string;
 }) {
+  const shiftStorageKey = `${storageKey}_shift`;
+  const confirmedStorageKey = `${storageKey}_confirmed`;
   const [shiftEndTime, setShiftEndTime] = useState<"20:00" | "08:00">("20:00");
   const [confirmedLines, setConfirmedLines] = useState<Record<string, boolean>>({});
-  const [records, setRecords] = useState<Record<string, RollRecord[]>>({
-    "24": [],
-    "25": [],
-    "26": [],
-  });
+  const [records, setRecords] = useState<Record<string, RollRecord[]>>(() => createEmptyRecords(lines));
 
   useEffect(() => {
     try {
-      const savedRecords = localStorage.getItem("daily_records_data");
+      const savedRecords = localStorage.getItem(storageKey) || localStorage.getItem("daily_records_data");
       if (savedRecords) {
-        setRecords(JSON.parse(savedRecords));
+        const parsed = JSON.parse(savedRecords);
+        setRecords({ ...createEmptyRecords(lines), ...parsed });
+      } else {
+        setRecords(createEmptyRecords(lines));
       }
-      const savedShiftEndTime = localStorage.getItem("daily_records_shift");
+      const savedShiftEndTime = localStorage.getItem(shiftStorageKey) || localStorage.getItem("daily_records_shift");
       if (savedShiftEndTime) {
         setShiftEndTime(savedShiftEndTime as "20:00" | "08:00");
       }
-      const savedConfirmedLines = localStorage.getItem("daily_records_confirmed");
+      const savedConfirmedLines = localStorage.getItem(confirmedStorageKey) || localStorage.getItem("daily_records_confirmed");
       if (savedConfirmedLines) {
         setConfirmedLines(JSON.parse(savedConfirmedLines));
+      } else {
+        setConfirmedLines({});
       }
     } catch (e) {
       console.error("Failed to parse saved data from localStorage", e);
     }
-  }, []);
+  }, [lines, storageKey, shiftStorageKey, confirmedStorageKey]);
+
+  const getLineRecords = (lineId: string) => records[lineId] || [];
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      localStorage.setItem(storageKey, JSON.stringify(records));
+      localStorage.setItem(shiftStorageKey, shiftEndTime);
+      localStorage.setItem(confirmedStorageKey, JSON.stringify(confirmedLines));
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [records, shiftEndTime, confirmedLines, storageKey, shiftStorageKey, confirmedStorageKey]);
+
+  const getDefaultSpeed = (lineId: string) => {
+    const speed = Number(defaultSpeeds[lineId]);
+    return Number.isFinite(speed) && speed > 0 ? speed : "";
+  };
+
+  const getOwnLength = (lineId: string, roll: RollRecord, index: number) => {
+    const total = parseFloat(String(roll.length));
+    if (isNaN(total)) return 0;
+    if (index !== 0) return total;
+    const previous = parseFloat(String(roll.previousLength || 0));
+    return Math.max(0, total - (isNaN(previous) ? 0 : previous));
+  };
+
+  const calculateOwnTotalLength = (lineId: string) => {
+    return getLineRecords(lineId).reduce(
+      (acc, curr, index) => acc + getOwnLength(lineId, curr, index),
+      0,
+    );
+  };
 
   const handleAddRoll = (lineId: string) => {
     if (confirmedLines[lineId]) {
       setConfirmedLines((prev) => ({ ...prev, [lineId]: false }));
     }
-    const prevRolls = records[lineId];
+    const prevRolls = getLineRecords(lineId);
     const lastRoll = prevRolls.length > 0 ? prevRolls[prevRolls.length - 1] : null;
     
     const newRoll: RollRecord = {
       id: Math.random().toString(36).substring(7),
       batchNo: "",
       length: "",
+      previousLength: "",
       startTime: lastRoll?.splitTime || "",
       splitTime: "",
       isLastRoll: false,
-      speed: "",
+      speed: getDefaultSpeed(lineId),
       currentLength: "",
     };
     setRecords((prev) => ({
       ...prev,
-      [lineId]: [...prev[lineId], newRoll],
+      [lineId]: [...(prev[lineId] || []), newRoll],
     }));
   };
 
   const handleRemoveRoll = (lineId: string, id: string) => {
     setRecords((prev) => ({
       ...prev,
-      [lineId]: prev[lineId].filter((r) => r.id !== id),
+      [lineId]: (prev[lineId] || []).filter((r) => r.id !== id),
     }));
   };
 
@@ -84,7 +131,7 @@ export default function DailyRecordPage({
     value: any
   ) => {
     setRecords((prev) => {
-      const lineRecords = [...prev[lineId]];
+      const lineRecords = [...(prev[lineId] || [])];
       const index = lineRecords.findIndex((r) => r.id === id);
       if (index === -1) return prev;
 
@@ -103,14 +150,15 @@ export default function DailyRecordPage({
   };
 
   const calculateTotalLength = (lineId: string) => {
-    return records[lineId].reduce((acc, curr) => {
+    return getLineRecords(lineId).reduce((acc, curr) => {
       const val = parseFloat(String(curr.length));
       return acc + (isNaN(val) ? 0 : val);
     }, 0);
   };
 
   const calculateLastRoll = (lineId: string, roll: RollRecord) => {
-    if (roll.speed !== "" && roll.currentLength !== "") {
+    const speed = roll.speed !== "" ? Number(roll.speed) : Number(getDefaultSpeed(lineId));
+    if (speed > 0 && roll.currentLength !== "") {
       const now = new Date();
       const currH = now.getHours();
       const currM = now.getMinutes();
@@ -126,7 +174,7 @@ export default function DailyRecordPage({
       }
       
       const diffMins = endTimeMins - currTimeMins;
-      const calcLen = Number(roll.currentLength) + Number(roll.speed) * diffMins;
+      const calcLen = Number(roll.currentLength) + speed * diffMins;
       
       handleUpdateRoll(lineId, roll.id, "length", calcLen.toFixed(1));
       alert(`计算完成！\n距离下班还有 ${Math.floor(diffMins / 60)}小时${diffMins % 60}分钟。\n最后一卷预计到达：${calcLen.toFixed(1)} m`);
@@ -170,9 +218,9 @@ export default function DailyRecordPage({
           </div>
           <button
             onClick={() => {
-              localStorage.setItem("daily_records_data", JSON.stringify(records));
-              localStorage.setItem("daily_records_shift", shiftEndTime);
-              localStorage.setItem("daily_records_confirmed", JSON.stringify(confirmedLines));
+              localStorage.setItem(storageKey, JSON.stringify(records));
+              localStorage.setItem(shiftStorageKey, shiftEndTime);
+              localStorage.setItem(confirmedStorageKey, JSON.stringify(confirmedLines));
               alert("数据已暂存于本地内存中。");
             }}
             className="flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold text-sm transition-colors shadow-sm"
@@ -184,7 +232,7 @@ export default function DailyRecordPage({
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        {LINES.map((lineId) => (
+        {lines.map((lineId) => (
           <div
             key={lineId}
             className="bg-white border text-left border-slate-200 rounded-2xl p-4 shadow-sm"
@@ -197,25 +245,25 @@ export default function DailyRecordPage({
                 <span className="font-bold text-slate-700">产线记录</span>
               </div>
               <span className="text-sm font-bold text-amber-600 bg-amber-50 px-2.5 py-1 rounded-md">
-                合计: {calculateTotalLength(lineId).toFixed(1)} m
+                我产合计: {calculateOwnTotalLength(lineId).toFixed(1)} m
               </span>
             </div>
 
             <div className="space-y-3">
              <div className="hidden sm:grid grid-cols-[1.5fr_0.8fr_1fr_1fr_auto] gap-2 px-2 text-xs font-bold text-slate-400">
                 <div>批次号</div>
-                <div>米数(m)</div>
+                <div>我产米数(m)</div>
                 <div>起卷时间</div>
                 <div>分卸状态/时间</div>
                 <div className="w-6"></div>
               </div>
 
-              {records[lineId].length === 0 ? (
+              {getLineRecords(lineId).length === 0 ? (
                 <div className="text-center py-6 text-slate-400 text-sm font-bold bg-slate-50 rounded-xl border border-dashed border-slate-300">
                   暂无记录
                 </div>
               ) : (
-                records[lineId].map((r, index) => (
+                getLineRecords(lineId).map((r, index) => (
                   <div key={r.id} className="flex flex-col gap-2">
                     <div
                       className={cn(
@@ -248,18 +296,51 @@ export default function DailyRecordPage({
                       <div className="w-full space-y-1">
                         {!confirmedLines[lineId] && <label className="sm:hidden text-[10px] font-bold text-slate-400">米数(m)</label>}
                         {confirmedLines[lineId] ? (
-                          <div className="text-[13px] font-bold text-indigo-600 py-1.5">{r.length ? `${r.length} m` : "-"}</div>
+                          <div className="text-[13px] font-bold text-indigo-600 py-1.5">
+                            {r.length ? (
+                              <div className="flex flex-col leading-tight">
+                                <span>我产 {getOwnLength(lineId, r, index).toFixed(1)} m</span>
+                                {index === 0 && (
+                                  <span className="text-[10px] text-slate-500">
+                                    同事 {Number(r.previousLength || 0).toFixed(1)} m / 本卷总 {r.length} m
+                                  </span>
+                                )}
+                              </div>
+                            ) : "-"}
+                          </div>
                         ) : (
-                          <input
-                            type="number"
-                            placeholder="米数"
-                            value={r.length}
-                            onChange={(e) =>
-                              handleUpdateRoll(lineId, r.id, "length", e.target.value)
-                            }
-                            step="0.1"
-                            className="w-full bg-white border border-slate-200 text-indigo-700 rounded p-1.5 text-[13px] font-bold shadow-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
-                          />
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-indigo-500 block">
+                              {index === 0 ? "本卷总米数（我 + 上班同事）" : "我生产的米数"}
+                            </label>
+                            <input
+                              type="number"
+                              placeholder={index === 0 ? "本卷总米数" : "我生产的米数"}
+                              value={r.length}
+                              onChange={(e) =>
+                                handleUpdateRoll(lineId, r.id, "length", e.target.value)
+                              }
+                              step="0.1"
+                              className="w-full bg-white border border-slate-200 text-indigo-700 rounded p-1.5 text-[13px] font-bold shadow-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                            />
+                            {index === 0 && (
+                              <div>
+                                <label className="text-[10px] font-bold text-amber-600 block">
+                                  上班同事已生产米数
+                                </label>
+                                <input
+                                  type="number"
+                                  placeholder="只填同事已生产"
+                                  value={r.previousLength || ""}
+                                  onChange={(e) =>
+                                    handleUpdateRoll(lineId, r.id, "previousLength", e.target.value)
+                                  }
+                                  step="0.1"
+                                  className="w-full bg-amber-50 border border-amber-200 text-amber-700 rounded p-1.5 text-[12px] font-bold shadow-sm focus:border-amber-500 focus:ring-1 focus:ring-amber-500 outline-none"
+                                />
+                              </div>
+                            )}
+                          </div>
                         )}
                       </div>
 
@@ -298,12 +379,17 @@ export default function DailyRecordPage({
                                  className="w-full bg-white border border-slate-200 rounded p-1.5 text-[13px] font-bold shadow-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
                                />
                             )}
-                            {index === records[lineId].length - 1 && (
+                            {index === getLineRecords(lineId).length - 1 && (
                               <label className={cn("flex items-center gap-1 cursor-pointer mt-0.5", r.isLastRoll && "h-8")}>
                                 <input 
                                   type="checkbox"
                                   checked={r.isLastRoll}
-                                  onChange={(e) => handleUpdateRoll(lineId, r.id, "isLastRoll", e.target.checked)}
+                                  onChange={(e) => {
+                                    handleUpdateRoll(lineId, r.id, "isLastRoll", e.target.checked);
+                                    if (e.target.checked && r.speed === "") {
+                                      handleUpdateRoll(lineId, r.id, "speed", getDefaultSpeed(lineId));
+                                    }
+                                  }}
                                   className="rounded text-indigo-600 focus:ring-indigo-500"
                                 />
                                 <span className="text-[10px] font-bold text-slate-500 whitespace-nowrap">最后一卷不卸卷</span>
@@ -329,7 +415,7 @@ export default function DailyRecordPage({
                           <label className="block text-[10px] font-bold text-indigo-800/70 mb-1">车速(m/min)</label>
                           <input
                             type="number"
-                            value={r.speed}
+                            value={r.speed === "" ? getDefaultSpeed(lineId) : r.speed}
                             onChange={(e) => handleUpdateRoll(lineId, r.id, "speed", e.target.value)}
                             className="w-full bg-white border border-indigo-200 text-indigo-700 rounded p-1.5 text-xs font-bold shadow-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
                           />
@@ -363,7 +449,7 @@ export default function DailyRecordPage({
                 添加卷记录
               </button>
 
-              {records[lineId].length > 0 && (
+              {getLineRecords(lineId).length > 0 && (
                 <button
                   onClick={() => setConfirmedLines(prev => ({...prev, [lineId]: !prev[lineId]}))}
                   className={cn(
