@@ -25,7 +25,6 @@ import {
   Droplets,
   Wrench,
   Scissors,
-  FastForward,
   CheckSquare,
   ListTodo,
   AlertTriangle,
@@ -39,7 +38,11 @@ import {
   Database,
   Flag,
   MapPin,
-  Calculator
+  Calculator,
+  Download,
+  Upload,
+  BellRing,
+  Play
 } from "lucide-react";
 import { cn } from "./lib/utils";
 import DailyRecordPage from "./DailyRecordPage";
@@ -172,8 +175,8 @@ export function getCurrentShiftStart(time: Date) {
 
 export function getPlanningShiftStart(time: Date) {
   const h = time.getHours();
-  // 提前准备，比如17点以后就算作准备当晚20点的夜班，早上5点以后算作准备8点的白班
-  if (h >= 5 && h < 17) {
+  // 规划模式可以提前准备下一班；凌晨 0-8 点仍属于前一天夜班，不能提前切到白班。
+  if (h >= 8 && h < 17) {
     const start = new Date(time);
     start.setHours(8, 0, 0, 0);
     return start;
@@ -290,6 +293,35 @@ const SESSION_STORAGE_KEY = "foil_app_session_user";
 const LOCAL_LINE_STATE_PREFIX = "foil_app_line_state";
 const DAILY_RECORD_PREFIX = "daily_records_data";
 const LOCAL_RETENTION_DAYS = 14;
+const LOCAL_BACKUP_SUFFIX = "__backup";
+const MIN_MANUAL_FORMED_LENGTH = 1;
+
+function readLocalStorageWithBackup(key: string) {
+  const value = localStorage.getItem(key);
+  if (value !== null) return value;
+  const backup = localStorage.getItem(`${key}${LOCAL_BACKUP_SUFFIX}`);
+  if (backup !== null) {
+    localStorage.setItem(key, backup);
+    return backup;
+  }
+  return null;
+}
+
+function writeLocalStorageWithBackup(key: string, value: string) {
+  localStorage.setItem(key, value);
+  localStorage.setItem(`${key}${LOCAL_BACKUP_SUFFIX}`, value);
+}
+
+function isAppLocalDataKey(key: string) {
+  return (
+    key === ACCOUNT_STORAGE_KEY ||
+    key === SESSION_STORAGE_KEY ||
+    key === "adminAuth" ||
+    key.startsWith(`${LOCAL_LINE_STATE_PREFIX}:`) ||
+    key.startsWith(`${DAILY_RECORD_PREFIX}_`) ||
+    key.endsWith(LOCAL_BACKUP_SUFFIX)
+  );
+}
 
 function normalizeLines(lines?: AssignedLine[]) {
   const source = lines && lines.length > 0 ? lines : DEFAULT_LINE_ASSIGNMENTS;
@@ -331,14 +363,14 @@ function normalizeAccounts(rawAccounts: AppAccount[]): AppAccount[] {
 
 function loadAccounts() {
   try {
-    const saved = localStorage.getItem(ACCOUNT_STORAGE_KEY);
+    const saved = readLocalStorageWithBackup(ACCOUNT_STORAGE_KEY);
     const parsed = saved ? JSON.parse(saved) : [];
     const accounts = normalizeAccounts(Array.isArray(parsed) ? parsed : []);
-    localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(accounts));
+    writeLocalStorageWithBackup(ACCOUNT_STORAGE_KEY, JSON.stringify(accounts));
     return accounts;
   } catch {
     const accounts = normalizeAccounts([]);
-    localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(accounts));
+    writeLocalStorageWithBackup(ACCOUNT_STORAGE_KEY, JSON.stringify(accounts));
     return accounts;
   }
 }
@@ -368,6 +400,23 @@ function createLineConfigMap(lines: AssignedLine[]) {
 function createLineDateMap<T>(lines: AssignedLine[], value: T) {
   return normalizeLines(lines).reduce<Record<LineId, T>>((acc, line) => {
     acc[line.id] = value;
+    return acc;
+  }, {});
+}
+
+function createJointSlotMap(lines: AssignedLine[]) {
+  return normalizeLines(lines).reduce<Record<LineId, JointSlotConfig[]>>((acc, line) => {
+    acc[line.id] = normalizeJointSlots();
+    return acc;
+  }, {});
+}
+
+function mergeJointSlotConfigs(
+  prev: Record<LineId, JointSlotConfig[]>,
+  lines: AssignedLine[],
+) {
+  return normalizeLines(lines).reduce<Record<LineId, JointSlotConfig[]>>((acc, line) => {
+    acc[line.id] = normalizeJointSlots(prev?.[line.id]);
     return acc;
   }, {});
 }
@@ -405,6 +454,7 @@ function pruneLocalStorageByDatePrefix(prefix: string, currentDateKey: string) {
     const savedTime = new Date(`${dateKey}T00:00:00`).getTime();
     if (Number.isFinite(savedTime) && currentTime - savedTime > maxAgeMs) {
       localStorage.removeItem(key);
+      localStorage.removeItem(`${key}${LOCAL_BACKUP_SUFFIX}`);
     }
   }
 }
@@ -427,6 +477,8 @@ function reviveSplicingTasks(raw: any): SplicingTask[] {
   return raw.map((task) => ({
     ...task,
     startTime: task.startTime ? new Date(task.startTime) : new Date(),
+    rackTimerStartedAt: task.rackTimerStartedAt ? new Date(task.rackTimerStartedAt) : undefined,
+    rackTimerDueAt: task.rackTimerDueAt ? new Date(task.rackTimerDueAt) : undefined,
   }));
 }
 
@@ -441,6 +493,7 @@ function reviveLocalLineState(
       lineConfigs: mergeLineConfigs(parsed.lineConfigs || {}, lines),
       activeSplicing: reviveSplicingTasks(parsed.activeSplicing),
       lastWashes: reviveDateMap(parsed.lastWashes, lines),
+      jointSlotConfigs: mergeJointSlotConfigs(parsed.jointSlotConfigs || {}, lines),
       punchRecords: parsed.punchRecords && typeof parsed.punchRecords === "object"
         ? parsed.punchRecords
         : {},
@@ -452,7 +505,30 @@ function reviveLocalLineState(
 }
 
 // 预留一些占位工艺段名称
-const STAGES = ["预留入口", "预处理", "A段化成", "B段化成", "收尾预留"];
+interface JointSlotConfig {
+  id: string;
+  name: string;
+  length: number;
+  uCount: number;
+}
+
+const DEFAULT_JOINT_SLOTS: JointSlotConfig[] = [
+  { id: "slot-1", name: "入口预处理槽", length: 40, uCount: 4 },
+  { id: "slot-2", name: "一段化成槽", length: 50, uCount: 5 },
+  { id: "slot-3", name: "二段化成槽", length: 50, uCount: 5 },
+  { id: "slot-4", name: "三段化成槽", length: 50, uCount: 5 },
+  { id: "slot-5", name: "后处理槽", length: 50, uCount: 5 },
+];
+
+function normalizeJointSlots(raw?: JointSlotConfig[]) {
+  const source = Array.isArray(raw) && raw.length > 0 ? raw : DEFAULT_JOINT_SLOTS;
+  return source.map((slot, index) => ({
+    id: slot.id || `slot-${index + 1}`,
+    name: String(slot.name || `槽${index + 1}`),
+    length: Math.max(1, Number(slot.length) || DEFAULT_JOINT_SLOTS[index]?.length || 10),
+    uCount: Math.max(1, Math.round(Number(slot.uCount) || DEFAULT_JOINT_SLOTS[index]?.uCount || 1)),
+  }));
+}
 
 interface PlannedRoll {
   id: string;
@@ -501,6 +577,10 @@ interface SplicingTask {
   line: LineId;
   startTime: Date;
   status: "splicing" | "waiting_rack" | "passing_rack" | "done";
+  rackTimerStartedAt?: Date;
+  rackTimerDueAt?: Date;
+  rackAlarmAcknowledged?: boolean;
+  sourceRollId?: string;
 }
 
 interface WashLog {
@@ -527,6 +607,62 @@ function getPlannedCorrosionDemand(config: LinePlanConfig) {
 
 function getFirstRollCarryIn(config: LinePlanConfig) {
   return getCurrentCorrosionRemaining(config) > 0 ? Number(config.fProduced || 0) : 0;
+}
+
+function getMinimumManualTarget(config: LinePlanConfig, index: number) {
+  return index === 0
+    ? Math.max(MIN_MANUAL_FORMED_LENGTH, getFirstRollCarryIn(config))
+    : MIN_MANUAL_FORMED_LENGTH;
+}
+
+function updateRollTargetWithBorrow(
+  config: LinePlanConfig,
+  rollIndex: number,
+  rawValue: number,
+) {
+  if (!Number.isFinite(rawValue) || !config.rolls[rollIndex]) return config;
+
+  const newRolls = [...config.rolls];
+  const current = newRolls[rollIndex];
+  const currentMin = getMinimumManualTarget(config, rollIndex);
+  let nextValue = Math.max(currentMin, rawValue);
+
+  let borrowIndex = -1;
+  if (rollIndex < newRolls.length - 1) {
+    borrowIndex = rollIndex + 1;
+  } else if (rollIndex > 0) {
+    borrowIndex = rollIndex - 1;
+  }
+
+  if (borrowIndex >= 0) {
+    const borrowMin = getMinimumManualTarget(config, borrowIndex);
+    const pairTotal =
+      Number(current.targetFormedLength || 0) +
+      Number(newRolls[borrowIndex].targetFormedLength || 0);
+    const maxValueKeepingBorrow = pairTotal - borrowMin;
+
+    if (maxValueKeepingBorrow >= currentMin) {
+      nextValue = Math.min(nextValue, maxValueKeepingBorrow);
+      const delta = nextValue - Number(current.targetFormedLength || 0);
+      newRolls[rollIndex] = {
+        ...newRolls[rollIndex],
+        targetFormedLength: Number(nextValue.toFixed(1)),
+      };
+      newRolls[borrowIndex] = {
+        ...newRolls[borrowIndex],
+        targetFormedLength: Number(
+          (Number(newRolls[borrowIndex].targetFormedLength || 0) - delta).toFixed(1),
+        ),
+      };
+      return { ...config, rolls: newRolls };
+    }
+  }
+
+  newRolls[rollIndex] = {
+    ...newRolls[rollIndex],
+    targetFormedLength: Number(nextValue.toFixed(1)),
+  };
+  return { ...config, rolls: newRolls };
 }
 
 function getRollCorrosionConsumed(
@@ -592,51 +728,246 @@ function applyCompletedRollAccounting(
   };
 }
 
+function TaskCountdownCard({
+  currentTime,
+  nowTime,
+  lineIds,
+  lineConfigs,
+  activeSplicing,
+  onStartRackCountdown,
+  onAcknowledgeRackAlarm,
+  onConfirmJointPrepComplete,
+}: {
+  currentTime: Date;
+  nowTime: Date;
+  lineIds: LineId[];
+  lineConfigs: Record<LineId, LinePlanConfig>;
+  activeSplicing: SplicingTask[];
+  onStartRackCountdown: (taskId: string) => void;
+  onAcknowledgeRackAlarm: (taskId: string) => void;
+  onConfirmJointPrepComplete: (lineId: LineId, sourceRollId: string) => void;
+}) {
+  const formatCountdown = (target: Date) => {
+    const diffMs = target.getTime() - nowTime.getTime();
+    const isOverdue = diffMs <= 0;
+    const absSeconds = Math.abs(Math.ceil(diffMs / 1000));
+    const mins = Math.floor(absSeconds / 60);
+    const secs = absSeconds % 60;
+    return `${isOverdue ? "已到时 " : ""}${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  };
+
+  const lineTasks = activeSplicing.filter((task) => lineIds.includes(task.line));
+  const activeRackTask = lineTasks
+    .filter((task) => task.rackTimerDueAt && !task.rackAlarmAcknowledged)
+    .sort((a, b) => new Date(a.rackTimerDueAt!).getTime() - new Date(b.rackTimerDueAt!).getTime())[0];
+
+  const pendingRackTask = lineTasks
+    .filter((task) => !task.rackTimerDueAt && !task.rackAlarmAcknowledged && task.status !== "done")
+    .sort((a, b) => b.startTime.getTime() - a.startTime.getTime())[0];
+
+  let plannedTask: {
+    id: string;
+    line: LineId;
+    label: string;
+    time: Date;
+    tone: "blue" | "orange";
+    type: "joint_prep" | "unroll";
+    sourceRollId?: string;
+  } | null = null;
+
+  if (!activeRackTask && !pendingRackTask) {
+    const candidates: NonNullable<typeof plannedTask>[] = [];
+    lineIds.forEach((lineId) => {
+      const config = lineConfigs[lineId];
+      let accC = 0;
+      config.rolls.forEach((roll, index) => {
+        const consumed = getRollCorrosionConsumed(roll, index, config);
+        accC += consumed;
+        const endTime = addMinutes(currentTime, accC / config.speed);
+        if (roll.isJoint) {
+          const jointPrepHandled = activeSplicing.some(
+            (task) => task.line === lineId && task.sourceRollId === roll.id,
+          );
+          const frontStartTime = new Date(
+            endTime.getTime() - (240 / config.speed) * 60000,
+          );
+          if (!jointPrepHandled && frontStartTime.getTime() >= nowTime.getTime()) {
+            candidates.push({
+              id: `joint-${lineId}-${roll.id}`,
+              line: lineId,
+              label: "接箔前端处理",
+              time: frontStartTime,
+              tone: "orange",
+              type: "joint_prep",
+              sourceRollId: roll.id,
+            });
+          }
+        }
+        if (endTime.getTime() >= nowTime.getTime()) {
+          candidates.push({
+            id: `unroll-${lineId}-${roll.id}`,
+            line: lineId,
+            label: roll.isJoint ? "接头出线分卷" : "分卷卸卷",
+            time: endTime,
+            tone: roll.isJoint ? "orange" : "blue",
+            type: "unroll",
+          });
+        }
+      });
+    });
+    plannedTask = candidates.sort((a, b) => a.time.getTime() - b.time.getTime())[0] || null;
+  }
+
+  if (activeRackTask) {
+    const dueAt = new Date(activeRackTask.rackTimerDueAt!);
+    const isRinging = nowTime.getTime() >= dueAt.getTime();
+    return (
+      <section
+        className={cn(
+          "rounded-2xl border p-4 shadow-sm",
+          isRinging
+            ? "bg-red-600 text-white border-red-700 animate-pulse shadow-red-500/30"
+            : "bg-amber-50 text-amber-950 border-amber-200",
+        )}
+      >
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className={cn("w-10 h-10 rounded-xl flex items-center justify-center shrink-0", isRinging ? "bg-white/20" : "bg-amber-100")}>
+              <BellRing size={22} />
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-black opacity-80">最近任务 · {activeRackTask.line}# 线</div>
+              <div className="font-black text-lg leading-tight">过架子</div>
+              <div className="text-xs font-bold opacity-75">目标时间 {format(dueAt, "HH:mm")}</div>
+            </div>
+          </div>
+          <div className="flex flex-col items-end gap-2 shrink-0">
+            <div className="font-mono text-3xl font-black tracking-tight">
+              {formatCountdown(dueAt)}
+            </div>
+            <button
+              type="button"
+              onClick={() => onAcknowledgeRackAlarm(activeRackTask.id)}
+              className={cn(
+                "px-4 py-2 rounded-lg font-black text-xs shadow",
+                isRinging
+                  ? "bg-white text-red-700"
+                  : "bg-amber-600 text-white hover:bg-amber-500",
+              )}
+            >
+              {isRinging ? "已处理，停止闹钟" : "已准备好，取消提醒"}
+            </button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (pendingRackTask) {
+    return (
+      <section className="rounded-2xl border border-orange-200 bg-orange-50 p-4 shadow-sm">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-orange-100 text-orange-700 flex items-center justify-center shrink-0">
+              <Clock size={22} />
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-black text-orange-700/80">最近任务 · {pendingRackTask.line}# 线</div>
+              <div className="font-black text-lg text-orange-950 leading-tight">过架子倒计时待开始</div>
+              <div className="text-xs font-bold text-orange-700/70">实际接箔完成后点击，开始 15 分钟计时</div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onStartRackCountdown(pendingRackTask.id)}
+            className="shrink-0 px-4 py-3 rounded-xl bg-orange-600 hover:bg-orange-500 active:scale-95 text-white font-black text-xs shadow flex items-center gap-2"
+          >
+            <Play size={15} fill="currentColor" />
+            开始计时
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (!plannedTask) {
+    return (
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="text-sm font-black text-slate-700">最近任务</div>
+        <div className="text-xs font-bold text-slate-400 mt-1">当前没有待处理的关键任务</div>
+      </section>
+    );
+  }
+
+  return (
+    <section className={cn(
+      "rounded-2xl border p-4 shadow-sm",
+      plannedTask.tone === "orange"
+        ? "bg-orange-50 border-orange-200 text-orange-950"
+        : "bg-blue-50 border-blue-200 text-blue-950",
+    )}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className={cn("w-10 h-10 rounded-xl flex items-center justify-center shrink-0", plannedTask.tone === "orange" ? "bg-orange-100 text-orange-700" : "bg-blue-100 text-blue-700")}>
+            <Clock size={22} />
+          </div>
+          <div className="min-w-0">
+            <div className="text-xs font-black opacity-75">最近任务 · {plannedTask.line}# 线</div>
+            <div className="font-black text-lg leading-tight">{plannedTask.label}</div>
+            <div className="text-xs font-bold opacity-70">预计 {format(plannedTask.time, "HH:mm")}</div>
+          </div>
+        </div>
+        <div className="font-mono text-3xl font-black tracking-tight shrink-0">
+          {formatCountdown(plannedTask.time)}
+        </div>
+      </div>
+      {plannedTask.type === "joint_prep" && (
+        <button
+          type="button"
+          onClick={() => onConfirmJointPrepComplete(plannedTask.line, plannedTask.sourceRollId || plannedTask.id)}
+          className="mt-3 w-full rounded-xl bg-orange-600 hover:bg-orange-500 active:scale-[0.99] text-white font-black text-sm py-3 shadow flex items-center justify-center gap-2"
+        >
+          <CheckSquare size={17} />
+          已处理好，开始过架子15分钟倒计时
+        </button>
+      )}
+    </section>
+  );
+}
+
 function CombinedPlanTimeline({
   lineConfigs,
   updateConfig,
   currentTime,
+  nowTime,
   lines,
-  isPlanningMode,
-  rollCompletionInputs,
-  setRollCompletionInputs,
-  rollCompletionTimeInputs,
-  setRollCompletionTimeInputs,
-  handleCompleteRoll,
+  activeSplicing,
+  onStartRackCountdown,
+  onAcknowledgeRackAlarm,
+  onConfirmJointPrepComplete,
 }: {
   lineConfigs: Record<LineId, LinePlanConfig>;
   updateConfig: (id: LineId, c: LinePlanConfig) => void;
   currentTime: Date;
+  nowTime: Date;
   lines: LineId[];
-  isPlanningMode: boolean;
-  rollCompletionInputs: Record<LineId, string>;
-  setRollCompletionInputs: React.Dispatch<React.SetStateAction<Record<LineId, string>>>;
-  rollCompletionTimeInputs: Record<LineId, string>;
-  setRollCompletionTimeInputs: React.Dispatch<React.SetStateAction<Record<LineId, string>>>;
-  handleCompleteRoll: (lineId: LineId) => void;
+  activeSplicing: SplicingTask[];
+  onStartRackCountdown: (taskId: string) => void;
+  onAcknowledgeRackAlarm: (taskId: string) => void;
+  onConfirmJointPrepComplete: (lineId: LineId, sourceRollId: string) => void;
 }) {
-  // Calculate 12-hour shift window
+  // Show the current shift plus the next shift so planned cuts can be moved past handoff.
   const shiftStart = getCurrentShiftStart(currentTime);
   const shiftEnd = getCurrentShiftEnd(currentTime);
-  const maxMinutes = differenceInMinutes(shiftEnd, shiftStart); // Typically 720
-
-  const updateRollProp = (
-    lineId: LineId,
-    idx: number,
-    prop: keyof PlannedRoll,
-    val: any,
-  ) => {
-    const c = lineConfigs[lineId];
-    const newRolls = [...c.rolls];
-    newRolls[idx] = { ...newRolls[idx], [prop]: val };
-    updateConfig(lineId, { ...c, rolls: newRolls });
-  };
+  const shiftMinutes = differenceInMinutes(shiftEnd, shiftStart); // Typically 720
+  const timelineMinutes = shiftMinutes * 2;
+  const shiftBoundaryPct = (shiftMinutes / timelineMinutes) * 100;
 
   return (
     <div className="mb-6 flex flex-col gap-6 w-full max-w-full">
       {/* The Unified Timeline Chart */}
       <div className="-mx-4 sm:mx-0 w-[calc(100%+32px)] sm:w-full overflow-x-auto hide-scrollbar sm:rounded-xl border-y sm:border border-slate-200 bg-slate-50 sm:shadow-inner relative z-0">
-        <div className="relative w-full text-slate-700 py-4 sm:py-6 pl-2 pr-2 sm:px-0">
+        <div className="relative w-full min-w-[920px] text-slate-700 py-4 sm:py-6 pl-2 pr-2 sm:px-0">
           
           <div className="absolute top-0 bottom-0 left-4 right-4 pointer-events-none z-0">
             {/* Ticks */}
@@ -654,26 +985,37 @@ function CombinedPlanTimeline({
             <div
               className="absolute top-8 bottom-0 border-l-2 border-blue-400 border-dashed z-0"
               style={{
-                left: `${Math.max(0, Math.min(100, (differenceInMinutes(currentTime, shiftStart) / maxMinutes) * 100))}%`
+                left: `${Math.max(0, Math.min(100, (differenceInMinutes(currentTime, shiftStart) / timelineMinutes) * 100))}%`
               }}
             ></div>
+
+            {/* Shift handoff boundary */}
+            <div
+              className="absolute top-8 bottom-0 border-l-2 border-orange-400 z-0"
+              style={{ left: `${shiftBoundaryPct}%` }}
+            >
+              <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-full bg-orange-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap">
+                下班 / 下一班
+              </div>
+            </div>
             
             {/* Labels */}
             <div className="absolute top-0 left-0 right-0 h-6 text-[10px] text-slate-400 font-bold flex items-start">
-              {Array.from({ length: 41 }, (_, i) => i * 0.25).map((pct) => {
+              {Array.from({ length: Math.floor(timelineMinutes / 120) + 1 }, (_, i) => i * 120).map((minuteFromStart) => {
+                const pct = minuteFromStart / timelineMinutes;
                 let transform = "-translate-x-1/2";
-                if (pct === 0) transform = "";
+                if (minuteFromStart === 0) transform = "";
                 
-                const tickTime = addMinutes(shiftStart, maxMinutes * pct);
+                const tickTime = addMinutes(shiftStart, minuteFromStart);
                 const isDifferentDay = tickTime.getDate() !== shiftStart.getDate();
 
                 return (
                   <div
-                    key={pct}
+                    key={minuteFromStart}
                     className={`absolute whitespace-nowrap z-0 ${transform}`}
                     style={{ left: `${pct * 100}%` }}
                   >
-                    {pct === 0 || isDifferentDay
+                    {minuteFromStart === 0 || isDifferentDay
                       ? format(tickTime, "MM-dd HH:mm") 
                       : format(tickTime, "HH:mm")}
                   </div>
@@ -681,7 +1023,7 @@ function CombinedPlanTimeline({
               })}
               {/* Current Time Indicator Text */}
               {(() => {
-                const pct = Math.max(0, Math.min(1, differenceInMinutes(currentTime, shiftStart) / maxMinutes));
+                const pct = Math.max(0, Math.min(1, differenceInMinutes(currentTime, shiftStart) / timelineMinutes));
                 let transform = "-translate-x-1/2";
                 if (pct < 0.05) transform = "";
                 if (pct > 0.95) transform = "-translate-x-full";
@@ -702,8 +1044,6 @@ function CombinedPlanTimeline({
         {lines.map((lineId) => {
           const config = lineConfigs[lineId];
           const totalToForm = getFirstRollCarryIn(config) + getPlannedCorrosionDemand(config);
-          const minL = lineId === "25" ? 300 : 400;
-          const maxL = lineId === "25" ? 800 : 550;
 
             const cumSum: number[] = [];
             let acc = 0;
@@ -729,9 +1069,8 @@ function CombinedPlanTimeline({
                       updateConfig={updateConfig}
                       currentTime={currentTime}
                       shiftStart={shiftStart}
-                      minL={minL}
-                      maxL={maxL}
-                      maxMinutes={maxMinutes}
+                      maxMinutes={timelineMinutes}
+                      shiftMinutes={shiftMinutes}
                     />
                   </div>
                 </div>
@@ -753,198 +1092,16 @@ function CombinedPlanTimeline({
                   {lineId}# 线配置
                 </span>
               </h4>
-              {(config.rolls.length > 0 || (config.completedRolls && config.completedRolls.length > 0)) ? (
-                <div className="flex flex-col gap-4">
-                  {(() => {
-                    const groups: { batchNumber: string; rolls: (PlannedRoll & { index: number, endT: Date })[] }[] = [];
-                    let currentGroup: any = null;
-
-                    // Add completed rolls first if not in planning mode
-                    if (!isPlanningMode && config.completedRolls) {
-                      getUnloadedCompletedRolls(config.completedRolls).forEach((cr, i) => {
-                        const batchNo = cr.corrosionBatchNo || "无批号";
-                        if (!currentGroup || currentGroup.batchNumber !== batchNo) {
-                          if (currentGroup) groups.push(currentGroup);
-                          currentGroup = { batchNumber: batchNo, rolls: [] };
-                        }
-                        currentGroup.rolls.push({
-                          id: cr.id,
-                          targetFormedLength: cr.length,
-                          isJoint: false,
-                          batchNumber: cr.corrosionBatchNo,
-                          formedBatchNo: cr.batchNo,
-                          index: -1 - i,
-                          endT: new Date(cr.unrollTime),
-                          isCompleted: true,
-                          actualLength: cr.length,
-                        });
-                      });
-                    }
-
-                    let accC = 0;
-                    config.rolls.forEach((roll, i) => {
-                      const cConsum = getRollCorrosionConsumed(roll, i, config);
-                      accC += cConsum;
-                      const endT = new Date(currentTime.getTime() + (accC / config.speed) * 60000);
-                      
-                      const batchNo = roll.batchNumber || "无批号";
-                      if (!currentGroup || currentGroup.batchNumber !== batchNo) {
-                        if (currentGroup) groups.push(currentGroup);
-                        currentGroup = { batchNumber: batchNo, rolls: [] };
-                      }
-                      currentGroup.rolls.push({ ...roll, index: i, endT });
-                    });
-                    if (currentGroup) groups.push(currentGroup);
-
-                    const groupColors = [
-                      "bg-blue-50/50 border-blue-100",
-                      "bg-indigo-50/50 border-indigo-100",
-                      "bg-emerald-50/50 border-emerald-100",
-                      "bg-amber-50/50 border-amber-100",
-                      "bg-purple-50/50 border-purple-100"
-                    ];
-
-                    return groups.map((group, groupIdx) => {
-                       const colorClass = groupColors[groupIdx % groupColors.length];
-                       return (
-                         <div key={groupIdx} className={cn("p-3 rounded-2xl border", colorClass)}>
-                           <div className="text-xs font-bold text-slate-700 mb-3 px-1 flex items-center gap-2">
-                             <div className="bg-white px-2 py-1.5 rounded shadow-sm border border-slate-200 flex items-center gap-2">
-                               <span className="shrink-0">腐蚀箔批号:</span>
-                               <input
-                                 type="text"
-                                 className="bg-transparent border-none text-slate-700 font-mono font-bold focus:outline-none focus:ring-1 focus:ring-blue-500 rounded px-1 w-32"
-                                 value={group.batchNumber === "无批号" ? "" : group.batchNumber}
-                                 placeholder="未指定"
-                                 onChange={(e) => {
-                                   const c = lineConfigs[lineId];
-                                   const newRolls = [...c.rolls];
-                                   group.rolls.forEach(r => {
-                                     newRolls[r.index] = { ...newRolls[r.index], batchNumber: e.target.value };
-                                   });
-                                   updateConfig(lineId, { ...c, rolls: newRolls });
-                                 }}
-                               />
-                             </div>
-                           </div>
-                           <div className="flex flex-col gap-3">
-                             {group.rolls.map((roll) => (
-                               <div
-                                 key={roll.id}
-                                 className={cn("transition-colors py-3 px-4 rounded-xl border shadow-sm relative", roll.isCompleted ? "bg-slate-50 border-slate-300 opacity-80" : "bg-white hover:bg-slate-50 border-slate-200")}
-                               >
-                                  <div className="flex justify-between items-center mb-1">
-                                    <span className="font-bold text-slate-700 bg-slate-100 flex flex-wrap items-center rounded text-xs border border-slate-200 overflow-hidden shadow-sm">
-                                      <span className="px-2 py-1 bg-slate-200/50 flex items-center gap-1.5">
-                                        <span>{roll.isCompleted ? "✅ 已卸卷" : `卷 #${roll.index + 1}`}</span>
-                                        {roll.isJoint && !roll.isCompleted && (
-                                          <span className="bg-orange-500 text-white text-[9px] px-1.5 py-0.5 rounded-sm whitespace-nowrap shadow-sm">末端接头必分卷</span>
-                                        )}
-                                      </span>
-                                      <input
-                                        type="text"
-                                        placeholder="化成箔批号"
-                                        disabled={roll.isCompleted}
-                                        className="bg-transparent border-none px-2 py-1 font-mono text-slate-600 focus:outline-none focus:bg-white w-28 placeholder:text-slate-400 placeholder:font-normal disabled:opacity-50"
-                                        value={roll.formedBatchNo || ""}
-                                        onChange={(e) => {
-                                          if (!roll.isCompleted) updateRollProp(lineId, roll.index, "formedBatchNo", e.target.value);
-                                        }}
-                                      />
-                                    </span>
-                                    <span className={cn("text-sm font-black flex flex-col items-end", roll.isCompleted ? "text-slate-500" : "text-blue-600")}>
-                                      <span>{roll.isCompleted ? roll.actualLength?.toFixed(1) : roll.targetFormedLength.toFixed(1)} m</span>
-                                      {!roll.isCompleted && (() => {
-                                         const fProd = getRollCorrosionConsumed(roll, roll.index, config) < roll.targetFormedLength
-                                           ? roll.targetFormedLength - getRollCorrosionConsumed(roll, roll.index, config)
-                                           : 0;
-                                         const isFirst = fProd > 0;
-                                         const endMs = roll.endT ? roll.endT.getTime() : 0;
-                                         const shiftEndMs = shiftEnd.getTime();
-                                         const spillMins = (endMs - shiftEndMs) / 60000;
-                                         const cConsum = getRollCorrosionConsumed(roll, roll.index, config);
-                                         const spillLength = Math.max(0, spillMins * config.speed);
-                                         const nextShiftLength = Math.min(cConsum, spillLength);
-                                         const thisShiftLength = cConsum - nextShiftLength;
-
-                                         if (isFirst && nextShiftLength < 1) {
-                                           return (
-                                             <span className="text-[10px] font-medium text-slate-500 mt-0.5 font-sans">
-                                               ({fProd.toFixed(1)}m 为接班已收, 本班产 {thisShiftLength.toFixed(1)}m)
-                                             </span>
-                                           );
-                                         } else if (isFirst && nextShiftLength >= 1) {
-                                           return (
-                                              <span className="text-[10px] font-bold text-amber-600 mt-0.5 font-sans leading-tight text-right flex flex-col items-end">
-                                                <span>{fProd.toFixed(1)}m 为接班已收</span>
-                                                <span>本班产 {thisShiftLength.toFixed(1)}m, 下班产 {nextShiftLength.toFixed(1)}m</span>
-                                              </span>
-                                           );
-                                         } else if (!isFirst && nextShiftLength >= 1 && thisShiftLength >= 1) {
-                                           return (
-                                             <span className="text-[10px] font-bold text-amber-600 mt-0.5 font-sans leading-tight text-right">
-                                               (本班产 {thisShiftLength.toFixed(1)}m, 下班产 {nextShiftLength.toFixed(1)}m)
-                                             </span>
-                                           );
-                                         } else if (!isFirst && nextShiftLength >= 1 && thisShiftLength < 1) {
-                                           return (
-                                             <span className="text-[10px] font-bold text-amber-600 mt-0.5 font-sans leading-tight text-right">
-                                               (全在下班产)
-                                             </span>
-                                           );
-                                         }
-                                         return null;
-                                       })()}
-                                     </span>
-                                  </div>
-                                  
-                                  {roll.index === 0 && !roll.isCompleted && (
-                                    <div className="flex bg-blue-50/50 rounded border border-blue-200/50 mt-3 p-1.5 items-center gap-2">
-                                      <span className="text-[10px] text-blue-800 font-bold shrink-0">本卷生产完成?</span>
-                                      <input
-                                        type="number"
-                                        className="w-16 text-xs p-1 border border-blue-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
-                                        placeholder={roll.targetFormedLength.toFixed(1)}
-                                        value={rollCompletionInputs[lineId] === undefined ? "" : rollCompletionInputs[lineId]}
-                                        onChange={(e) => setRollCompletionInputs(p => ({ ...p, [lineId]: e.target.value }))}
-                                      />
-                                      <span className="text-xs text-blue-800/60 font-mono -ml-1">m</span>
-                                      <input
-                                        type="time"
-                                        className="w-20 text-xs p-1 border border-blue-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono ml-1"
-                                        value={rollCompletionTimeInputs[lineId] === undefined ? "" : rollCompletionTimeInputs[lineId]}
-                                        onChange={(e) => setRollCompletionTimeInputs(p => ({ ...p, [lineId]: e.target.value }))}
-                                      />
-                                      <button
-                                        onClick={() => handleCompleteRoll(lineId)}
-                                        disabled={!rollCompletionInputs[lineId] || !rollCompletionTimeInputs[lineId]}
-                                        className="ml-auto bg-blue-600 disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed hover:bg-blue-500 active:bg-blue-700 text-white text-[10px] font-bold px-3 py-1.5 rounded transition-all shadow-sm"
-                                      >
-                                        卸卷确认
-                                      </button>
-                                    </div>
-                                  )}
-
-                                  {roll.isJoint && roll.endT && (
-                                    <div className="flex items-center gap-2 mt-2">
-                                      <div className="text-[10px] text-orange-600 font-bold px-2 py-1 bg-orange-50 border border-orange-200 rounded shadow-sm inline-block">
-                                        含接头 (近 {format(roll.endT, "HH:mm")} 走出机器)
-                                      </div>
-                                    </div>
-                                  )}
-                               </div>
-                             ))}
-                           </div>
-                         </div>
-                       );
-                    });
-                  })()}
-                </div>
-              ) : (
-                <div className="py-8 text-center text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200 text-xs">
-                  无分卷数据。
-                </div>
-              )}
+              <TaskCountdownCard
+                currentTime={currentTime}
+                nowTime={nowTime}
+                lineIds={[lineId]}
+                lineConfigs={lineConfigs}
+                activeSplicing={activeSplicing}
+                onStartRackCountdown={onStartRackCountdown}
+                onAcknowledgeRackAlarm={onAcknowledgeRackAlarm}
+                onConfirmJointPrepComplete={onConfirmJointPrepComplete}
+              />
             </div>
           );
         })}
@@ -1189,9 +1346,8 @@ function DraggableTimelineLine({
   updateConfig,
   currentTime,
   shiftStart,
-  minL,
-  maxL,
   maxMinutes,
+  shiftMinutes,
 }: any) {
   const barRef = useRef<HTMLDivElement>(null);
   const [draggingIdx, setDraggingIdx] = useState<number | null>(null);
@@ -1220,11 +1376,12 @@ function DraggableTimelineLine({
       const prevH = draggingIdx === 0 ? 0 : cumSum[draggingIdx - 1];
       const nextH = cumSum[draggingIdx + 1];
 
-      let leftMin = minL;
-      if (draggingIdx === 0) leftMin = Math.max(minL, firstCarryIn);
+      let leftMin = MIN_MANUAL_FORMED_LENGTH;
+      if (draggingIdx === 0) leftMin = Math.max(MIN_MANUAL_FORMED_LENGTH, firstCarryIn);
+      const rightMin = getMinimumManualTarget(config, draggingIdx + 1);
 
       let minAllowedPos = prevH + leftMin;
-      let maxAllowedPos = nextH - minL;
+      let maxAllowedPos = nextH - rightMin;
 
       if (minAllowedPos > maxAllowedPos) {
         minAllowedPos = prevH + 50;
@@ -1264,8 +1421,6 @@ function DraggableTimelineLine({
     totalToForm,
     lineId,
     cumSum,
-    minL,
-    maxL,
     maxMinutes,
     updateConfig,
     currMinutesFromStart,
@@ -1392,49 +1547,7 @@ function DraggableTimelineLine({
                         onBlur={() => {
                           let val = parseFloat(editValue);
                           if (!isNaN(val) && val !== roll.targetFormedLength) {
-                            let leftMin = minL;
-                            if (i === 0) leftMin = Math.max(minL, getFirstRollCarryIn(config));
-                            
-                            let sum = 0;
-                            let otherTarget = 0;
-                            let canBorrow = false;
-                            let borrowIdx = -1;
-                            
-                            if (i < config.rolls.length - 1) {
-                              borrowIdx = i + 1;
-                              otherTarget = config.rolls[i+1].targetFormedLength;
-                              sum = roll.targetFormedLength + otherTarget;
-                              canBorrow = true;
-                            } else if (i > 0) {
-                              borrowIdx = i - 1;
-                              otherTarget = config.rolls[i-1].targetFormedLength;
-                              sum = roll.targetFormedLength + otherTarget;
-                              leftMin = minL;
-                              canBorrow = true;
-                            }
-                            
-                            if (canBorrow) {
-                               const borrowMin = borrowIdx === 0 ? Math.max(minL, getFirstRollCarryIn(config)) : minL;
-                               const maxAllowed = sum - borrowMin;
-                               const minAllowed = leftMin;
-                               
-                               if (minAllowed <= maxAllowed) {
-                                  val = Math.max(minAllowed, Math.min(maxAllowed, val));
-                               } else {
-                                  val = Math.max(leftMin, val);
-                               }
-                               
-                               const delta = val - roll.targetFormedLength;
-                               const newRolls = [...config.rolls];
-                               newRolls[i] = { ...newRolls[i], targetFormedLength: val };
-                               newRolls[borrowIdx] = { ...newRolls[borrowIdx], targetFormedLength: newRolls[borrowIdx].targetFormedLength - delta };
-                               updateConfig(lineId, { ...config, rolls: newRolls });
-                            } else {
-                               val = Math.max(leftMin, val);
-                               const newRolls = [...config.rolls];
-                               newRolls[i] = { ...newRolls[i], targetFormedLength: val };
-                               updateConfig(lineId, { ...config, rolls: newRolls });
-                            }
+                            updateConfig(lineId, updateRollTargetWithBorrow(config, i, val));
                           }
                           // Note: we can't clear setEditingRollIdx(null) onBlur because it blocks click events on the Plus/Trash icons.
                           // Instead, let's use a timeout or let the click handler in the background close it.
@@ -1565,7 +1678,7 @@ function DraggableTimelineLine({
                     </span>
                     
                     {(() => {
-                      if (startMinutesFromShiftStart > maxMinutes) {
+                      if (startMinutesFromShiftStart > shiftMinutes) {
                         return (
                           <span className="text-[8px] sm:text-[9px] font-bold text-slate-500 leading-none mt-0.5 truncate">
                             (全在下班产)
@@ -1576,8 +1689,8 @@ function DraggableTimelineLine({
                       const carryIn = i === 0 ? getFirstRollCarryIn(config) : 0;
                       let inShift = roll.targetFormedLength - carryIn;
                       
-                      if (endMinutesFromShiftStart > maxMinutes) {
-                         const spillMins = endMinutesFromShiftStart - maxMinutes;
+                      if (endMinutesFromShiftStart > shiftMinutes) {
+                         const spillMins = endMinutesFromShiftStart - shiftMinutes;
                          const spillLength = spillMins * config.speed;
                          inShift = Math.max(0, inShift - spillLength);
                          
@@ -1775,7 +1888,7 @@ function UserAssignmentPage({
 
   const saveAccounts = (nextAccounts: AppAccount[]) => {
     const normalized = normalizeAccounts(nextAccounts);
-    localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(normalized));
+    writeLocalStorageWithBackup(ACCOUNT_STORAGE_KEY, JSON.stringify(normalized));
     onAccountsChange(normalized);
   };
 
@@ -1976,7 +2089,7 @@ function UserAssignmentPage({
 export default function App() {
   const [accounts, setAccounts] = useState<AppAccount[]>(() => loadAccounts());
   const [appUser, setAppUser] = useState<AppAccount | null>(() => {
-    const savedUsername = localStorage.getItem(SESSION_STORAGE_KEY);
+    const savedUsername = readLocalStorageWithBackup(SESSION_STORAGE_KEY);
     if (!savedUsername) return null;
     return loadAccounts().find((account) => account.username === savedUsername) || null;
   });
@@ -1994,6 +2107,7 @@ export default function App() {
 
   // -- Shift info --
   const shiftInfo = getShiftInfo(currentTime);
+  const scheduleTime = isPlanningMode ? getPlanningShiftStart(currentTime) : currentTime;
 
   // If the user opens this on a rest day, provide a way to simulate a workday for the timeline
   const viewDate =
@@ -2006,9 +2120,9 @@ export default function App() {
     Record<string, { in: boolean; out: boolean }>
   >({});
 
-  const { user, signIn, logOut } = useAuth();
+  const { user } = useAuth();
   
-  const dateKey = format(currentTime, "yyyy-MM-dd");
+  const dateKey = format(getCurrentShiftStart(scheduleTime), "yyyy-MM-dd");
 
 
 
@@ -2087,6 +2201,9 @@ export default function App() {
   const [lastWashes, setLastWashes] = useState<Record<LineId, Date | null>>(() =>
     createLineDateMap(lineAssignments, null),
   );
+  const [jointSlotConfigs, setJointSlotConfigs] = useState<Record<LineId, JointSlotConfig[]>>(() =>
+    createJointSlotMap(lineAssignments),
+  );
 
   // -- line config states --
   const [lineConfigs, setLineConfigs] = useState<
@@ -2111,6 +2228,7 @@ export default function App() {
   const [forecastLengths, setForecastLengths] = useState<Record<string, string>>({});
   const [showOnlyJointPrep, setShowOnlyJointPrep] = useState(false);
   const [showCompletedRolls, setShowCompletedRolls] = useState(false);
+  const [localBackupMessage, setLocalBackupMessage] = useState("");
   const [rollCompletionInputs, setRollCompletionInputs] = useState<Record<LineId, string>>(() =>
     createLineDateMap(lineAssignments, ""),
   );
@@ -2124,6 +2242,43 @@ export default function App() {
     dinnerEnd: 17 + 50 / 60,
   });
   const localStateHydratedKeyRef = useRef<string | null>(null);
+  const localBackupInputRef = useRef<HTMLInputElement | null>(null);
+  const alarmIntervalRef = useRef<number | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+
+  const playRackAlarmBurst = () => {
+    const AudioCtor =
+      window.AudioContext ||
+      (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtor) return;
+    const audioContext = audioContextRef.current || new AudioCtor();
+    audioContextRef.current = audioContext;
+    if (audioContext.state === "suspended") {
+      void audioContext.resume();
+    }
+
+    const now = audioContext.currentTime;
+    [0, 0.22, 0.44].forEach((offset) => {
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = "square";
+      oscillator.frequency.setValueAtTime(920, now + offset);
+      gain.gain.setValueAtTime(0.001, now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.65, now + offset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.16);
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start(now + offset);
+      oscillator.stop(now + offset + 0.18);
+    });
+  };
+
+  const stopRackAlarm = () => {
+    if (alarmIntervalRef.current !== null) {
+      window.clearInterval(alarmIntervalRef.current);
+      alarmIntervalRef.current = null;
+    }
+  };
 
   useEffect(() => {
     setLineConfigs((prev) => mergeLineConfigs(prev, lineAssignments));
@@ -2151,6 +2306,7 @@ export default function App() {
           .map((line) => [line, prev[line]]),
       ),
     }));
+    setJointSlotConfigs((prev) => mergeJointSlotConfigs(prev, lineAssignments));
     setSelectedLine((prev) => (activeLines.includes(prev) ? prev : activeLines[0]));
   }, [activeLines, lineAssignments]);
 
@@ -2160,14 +2316,16 @@ export default function App() {
     pruneLocalStorageByDatePrefix(`${LOCAL_LINE_STATE_PREFIX}:${appUser.username}:`, dateKey);
     pruneLocalStorageByDatePrefix(`${DAILY_RECORD_PREFIX}_${appUser.username}_`, dateKey);
     localStateHydratedKeyRef.current = null;
-    const restored = reviveLocalLineState(localStorage.getItem(storageKey), lineAssignments);
+    const restored = reviveLocalLineState(readLocalStorageWithBackup(storageKey), lineAssignments);
     if (restored) {
       setLineConfigs(restored.lineConfigs);
       setActiveSplicing(restored.activeSplicing);
       setLastWashes(restored.lastWashes);
+      setJointSlotConfigs(restored.jointSlotConfigs);
       setPunchRecords(restored.punchRecords);
     } else {
       setLineConfigs((prev) => mergeLineConfigs(prev, lineAssignments));
+      setJointSlotConfigs((prev) => mergeJointSlotConfigs(prev, lineAssignments));
       setLastWashes((prev) => ({
         ...createLineDateMap(lineAssignments, null),
         ...Object.fromEntries(
@@ -2185,16 +2343,17 @@ export default function App() {
     const storageKey = getLocalLineStateKey(appUser.username, dateKey);
     if (localStateHydratedKeyRef.current !== storageKey) return;
     const timer = setTimeout(() => {
-      localStorage.setItem(storageKey, JSON.stringify({
+      writeLocalStorageWithBackup(storageKey, JSON.stringify({
         lineConfigs,
         activeSplicing,
         lastWashes,
+        jointSlotConfigs,
         punchRecords,
         savedAt: new Date().toISOString(),
       }));
     }, 300);
     return () => clearTimeout(timer);
-  }, [lineConfigs, activeSplicing, lastWashes, punchRecords, appUser, dateKey]);
+  }, [lineConfigs, activeSplicing, lastWashes, jointSlotConfigs, punchRecords, appUser, dateKey]);
 
   useEffect(() => {
     if (!user) return;
@@ -2247,6 +2406,12 @@ export default function App() {
               return currentStr !== data.lastWashes ? JSON.parse(data.lastWashes) : prev;
             });
           }
+          if (data.jointSlotConfigs) {
+             setJointSlotConfigs(prev => {
+              const currentStr = JSON.stringify(prev);
+              return currentStr !== data.jointSlotConfigs ? mergeJointSlotConfigs(JSON.parse(data.jointSlotConfigs), lineAssignments) : prev;
+            });
+          }
         } catch(e) {
           handleFirestoreError(e, OperationType.GET, path);
         }
@@ -2274,6 +2439,7 @@ export default function App() {
           lineConfigs: JSON.stringify(lineConfigs),
           activeSplicing: JSON.stringify(activeSplicing),
           lastWashes: JSON.stringify(lastWashes),
+          jointSlotConfigs: JSON.stringify(jointSlotConfigs),
           updatedAt: serverTimestamp()
         }, { merge: true });
       } catch (e) {
@@ -2282,7 +2448,7 @@ export default function App() {
     };
     const timer = setTimeout(saveState, 500);
     return () => clearTimeout(timer);
-  }, [lineConfigs, activeSplicing, lastWashes, user, dateKey]);
+  }, [lineConfigs, activeSplicing, lastWashes, jointSlotConfigs, user, dateKey]);
 
   // debounce writes to firestore for punchRecords
   useEffect(() => {
@@ -2429,6 +2595,24 @@ export default function App() {
     handleGeneratePlan(selectedLine, newConfigs);
   };
 
+  const handleUpdateFutureRoll = (
+    lineId: LineId,
+    id: string,
+    updates: Partial<Pick<FutureRoll, "batchNo" | "length">>,
+  ) => {
+    const p = lineConfigs;
+    const newConfigs = {
+      ...p,
+      [lineId]: {
+        ...p[lineId],
+        futureRolls: (p[lineId].futureRolls || []).map((roll) =>
+          roll.id === id ? { ...roll, ...updates } : roll,
+        ),
+      },
+    };
+    handleGeneratePlan(lineId, newConfigs);
+  };
+
   const handleSavePlan = async () => {
     if (!user) return;
     try {
@@ -2438,7 +2622,8 @@ export default function App() {
         timestamp: serverTimestamp(),
         lineConfigs: JSON.stringify(lineConfigs),
         activeSplicing: JSON.stringify(activeSplicing),
-        lastWashes: JSON.stringify(lastWashes)
+        lastWashes: JSON.stringify(lastWashes),
+        jointSlotConfigs: JSON.stringify(jointSlotConfigs),
       });
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
@@ -2450,30 +2635,41 @@ export default function App() {
   // Form - Unroll
   const [unloadLength, setUnloadLength] = useState("");
 
-  // Form - Observe
-  const [observeStage, setObserveStage] = useState(STAGES[0]);
-
   useEffect(() => {
     const timer = setInterval(() => {
       const baseTime = new Date(Date.now() + timeOffset);
-      if (isPlanningMode) {
-        setCurrentTime(getPlanningShiftStart(baseTime));
-      } else {
-        setCurrentTime(baseTime);
-      }
+      setCurrentTime(baseTime);
     }, 1000);
     return () => clearInterval(timer);
-  }, [timeOffset, isPlanningMode]);
+  }, [timeOffset]);
+
+  useEffect(() => {
+    const hasRingingRackAlarm = activeSplicing.some(
+      (task) =>
+        task.rackTimerDueAt &&
+        currentTime.getTime() >= new Date(task.rackTimerDueAt).getTime() &&
+        !task.rackAlarmAcknowledged,
+    );
+
+    if (hasRingingRackAlarm && alarmIntervalRef.current === null) {
+      playRackAlarmBurst();
+      alarmIntervalRef.current = window.setInterval(playRackAlarmBurst, 2500);
+    }
+
+    if (!hasRingingRackAlarm) {
+      stopRackAlarm();
+    }
+
+    return () => {
+      if (!hasRingingRackAlarm) stopRackAlarm();
+    };
+  }, [activeSplicing, currentTime]);
 
   const handleTogglePlanningMode = () => {
     setIsPlanningMode((prev) => {
       const next = !prev;
       const baseTime = new Date(Date.now() + timeOffset);
-      if (next) {
-        setCurrentTime(getPlanningShiftStart(baseTime));
-      } else {
-        setCurrentTime(baseTime);
-      }
+      setCurrentTime(baseTime);
       return next;
     });
   };
@@ -2490,21 +2686,13 @@ export default function App() {
     const targetDate = new Date(year, month - 1, day, hour, min, 0);
     const offset = targetDate.getTime() - Date.now();
     setTimeOffset(offset);
-    if (isPlanningMode) {
-      setCurrentTime(getPlanningShiftStart(new Date(Date.now() + offset)));
-    } else {
-      setCurrentTime(new Date(Date.now() + offset));
-    }
+    setCurrentTime(new Date(Date.now() + offset));
     setShowSimulator(false);
   };
 
   const resetSimulation = () => {
     setTimeOffset(0);
-    if (isPlanningMode) {
-      setCurrentTime(getPlanningShiftStart(new Date()));
-    } else {
-      setCurrentTime(new Date());
-    }
+    setCurrentTime(new Date());
     setShowSimulator(false);
   };
 
@@ -2520,19 +2708,133 @@ export default function App() {
     ]);
   };
 
+  const ensureAlarmAudioReady = () => {
+    const AudioCtor =
+      window.AudioContext ||
+      (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (AudioCtor && !audioContextRef.current) {
+      audioContextRef.current = new AudioCtor();
+    }
+    void audioContextRef.current?.resume();
+  };
+
+  const handleStartRackCountdown = (taskId: string) => {
+    ensureAlarmAudioReady();
+    setActiveSplicing((prev) =>
+      prev.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              status: "waiting_rack",
+              rackTimerStartedAt: currentTime,
+              rackTimerDueAt: addMinutes(currentTime, 15),
+              rackAlarmAcknowledged: false,
+            }
+          : task,
+      ),
+    );
+  };
+
+  const handleConfirmJointPrepComplete = (lineId: LineId, sourceRollId: string) => {
+    ensureAlarmAudioReady();
+    setActiveSplicing((prev) => [
+      ...prev,
+      {
+        id: Math.random().toString(),
+        line: lineId,
+        startTime: currentTime,
+        status: "waiting_rack",
+        rackTimerStartedAt: currentTime,
+        rackTimerDueAt: addMinutes(currentTime, 15),
+        rackAlarmAcknowledged: false,
+        sourceRollId,
+      },
+    ]);
+  };
+
+  const handleAcknowledgeRackAlarm = (taskId: string) => {
+    stopRackAlarm();
+    setActiveSplicing((prev) =>
+      prev.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              status: "passing_rack",
+              rackAlarmAcknowledged: true,
+            }
+          : task,
+      ),
+    );
+  };
+
   const handleRecordWash = () => {
     setLastWashes((prev) => ({ ...prev, [selectedLine]: currentTime }));
+  };
+
+  const updateJointSlot = (
+    lineId: LineId,
+    slotId: string,
+    updates: Partial<JointSlotConfig>,
+  ) => {
+    setJointSlotConfigs((prev) => ({
+      ...prev,
+      [lineId]: normalizeJointSlots(
+        (prev[lineId] || []).map((slot) =>
+          slot.id === slotId ? { ...slot, ...updates } : slot,
+        ),
+      ),
+    }));
+  };
+
+  const addJointSlot = (lineId: LineId) => {
+    setJointSlotConfigs((prev) => ({
+      ...prev,
+      [lineId]: [
+        ...(prev[lineId] || []),
+        {
+          id: Math.random().toString(),
+          name: `新槽${(prev[lineId] || []).length + 1}`,
+          length: 10,
+          uCount: 1,
+        },
+      ],
+    }));
+  };
+
+  const removeJointSlot = (lineId: LineId, slotId: string) => {
+    setJointSlotConfigs((prev) => ({
+      ...prev,
+      [lineId]: normalizeJointSlots((prev[lineId] || []).filter((slot) => slot.id !== slotId)),
+    }));
+  };
+
+  const resetJointSlots = (lineId: LineId) => {
+    setJointSlotConfigs((prev) => ({
+      ...prev,
+      [lineId]: normalizeJointSlots(),
+    }));
   };
 
   // derived state for Splicing Tasks
   const updatedSplicingTasks = activeSplicing.map((task) => {
     const minElapsed = differenceInMinutes(currentTime, task.startTime);
+    const rackDueAt = task.rackTimerDueAt ? new Date(task.rackTimerDueAt) : null;
+    const rackRemainingMinutes = rackDueAt
+      ? Math.ceil((rackDueAt.getTime() - currentTime.getTime()) / 60000)
+      : null;
     // Logic: 30m splice -> wait 15m - 20m -> 10m pass rack
     let displayStatus = "接箔中";
     let urgency = "normal";
     let progress = 0;
 
-    if (minElapsed < 30) {
+    if (rackDueAt && !task.rackAlarmAcknowledged) {
+      displayStatus =
+        rackRemainingMinutes !== null && rackRemainingMinutes > 0
+          ? `过架子倒计时 (${rackRemainingMinutes}m)`
+          : "过架子时间到";
+      urgency = rackRemainingMinutes !== null && rackRemainingMinutes <= 0 ? "critical" : "warning";
+      progress = 100;
+    } else if (minElapsed < 30) {
       displayStatus = `接箔作业 (${30 - minElapsed}m 剩余)`;
       progress = (minElapsed / 30) * 100;
     } else if (minElapsed < 45) {
@@ -2547,7 +2849,7 @@ export default function App() {
       displayStatus = "作业结束";
       progress = 100;
     }
-    return { ...task, minElapsed, displayStatus, urgency, progress };
+    return { ...task, minElapsed, rackDueAt, rackRemainingMinutes, displayStatus, urgency, progress };
   });
 
   const handleGeneratePlan = (
@@ -2561,7 +2863,7 @@ export default function App() {
     const minL = lineId === "25" ? 300 : 400;
     const maxL = lineId === "25" ? 800 : 550;
 
-    const shiftEnd = getCurrentShiftEnd(currentTime);
+    const shiftEnd = getCurrentShiftEnd(scheduleTime);
 
     // Collect planned times from OTHER lines to encourage bundling
     const otherRollTimes: number[] = [];
@@ -2571,10 +2873,7 @@ export default function App() {
         currentLineConfigs[l].rolls.forEach((r, i) => {
           const cConsum = getRollCorrosionConsumed(r, i, currentLineConfigs[l]);
           accC += cConsum;
-          const endT = new Date(
-            currentTime.getTime() +
-              (accC / currentLineConfigs[l].speed) * 60000,
-          );
+          const endT = addMinutes(scheduleTime, accC / currentLineConfigs[l].speed);
           otherRollTimes.push(endT.getTime());
         });
       }
@@ -2605,10 +2904,7 @@ export default function App() {
           if (cConsum < 0) cConsum = 0;
           accForFoil += cConsum;
 
-          const endTime = new Date(
-            currentTime.getTime() +
-              ((globalAccC + accForFoil) / conf.speed) * 60000,
-          );
+          const endTime = addMinutes(scheduleTime, (globalAccC + accForFoil) / conf.speed);
           const endMs = endTime.getTime();
           const shiftEndMs = shiftEnd.getTime();
 
@@ -2748,10 +3044,10 @@ export default function App() {
     let accC = 0;
     return config.rolls.map((roll, i) => {
       const startT =
-        i === 0 ? currentTime : addMinutes(currentTime, accC / config.speed);
+        i === 0 ? scheduleTime : addMinutes(scheduleTime, accC / config.speed);
       const cConsum = getRollCorrosionConsumed(roll, i, config);
       accC += cConsum;
-      const endT = addMinutes(currentTime, accC / config.speed);
+      const endT = addMinutes(scheduleTime, accC / config.speed);
       const meal = checkMealConflict(endT, mealConfig);
       const isWarning =
         (lineId === "25" &&
@@ -2769,12 +3065,94 @@ export default function App() {
     });
   };
 
+  const getJointTrackingForLine = (lineId: LineId) => {
+    const config = lineConfigs[lineId];
+    const slots = normalizeJointSlots(jointSlotConfigs[lineId]);
+    const totalSlotLength = slots.reduce((sum, slot) => sum + slot.length, 0);
+    let accC = 0;
+
+    return config.rolls
+      .map((roll, index) => {
+        const consumed = getRollCorrosionConsumed(roll, index, config);
+        accC += consumed;
+        if (!roll.isJoint) return null;
+
+        const exitTime = addMinutes(scheduleTime, accC / config.speed);
+        const startTime = addMinutes(exitTime, -240 / config.speed);
+        const endTime = addMinutes(startTime, totalSlotLength / config.speed);
+        const elapsedMinutes = (currentTime.getTime() - startTime.getTime()) / 60000;
+        const distance = elapsedMinutes * config.speed;
+        const clampedDistance = Math.max(0, Math.min(totalSlotLength, distance));
+
+        let slotStart = 0;
+        let currentSlot = slots[0];
+        for (const slot of slots) {
+          if (clampedDistance <= slotStart + slot.length || slot === slots[slots.length - 1]) {
+            currentSlot = slot;
+            break;
+          }
+          slotStart += slot.length;
+        }
+
+        const inSlotDistance = Math.max(0, clampedDistance - slotStart);
+        const uLength = currentSlot ? currentSlot.length / Math.max(1, currentSlot.uCount) : 1;
+        const currentU = currentSlot
+          ? Math.min(currentSlot.uCount, Math.floor(inSlotDistance / uLength) + 1)
+          : 1;
+        const status =
+          distance < 0
+            ? "未进入"
+            : distance > totalSlotLength
+              ? "已出线"
+              : "追踪中";
+
+        return {
+          id: roll.id,
+          lineId,
+          batchNumber: roll.batchNumber,
+          startTime,
+          exitTime,
+          endTime,
+          distance,
+          clampedDistance,
+          status,
+          currentSlot,
+          currentU,
+          inSlotDistance,
+          totalSlotLength,
+          progress: totalSlotLength > 0 ? (clampedDistance / totalSlotLength) * 100 : 0,
+        };
+      })
+      .filter(Boolean)
+      .sort((a: any, b: any) => {
+        const rank = (item: any) => item.status === "追踪中" ? 0 : item.status === "未进入" ? 1 : 2;
+        const rankDiff = rank(a) - rank(b);
+        if (rankDiff !== 0) return rankDiff;
+        return a.startTime.getTime() - b.startTime.getTime();
+      }) as Array<{
+        id: string;
+        lineId: LineId;
+        batchNumber?: string;
+        startTime: Date;
+        exitTime: Date;
+        endTime: Date;
+        distance: number;
+        clampedDistance: number;
+        status: string;
+        currentSlot?: JointSlotConfig;
+        currentU: number;
+        inSlotDistance: number;
+        totalSlotLength: number;
+        progress: number;
+      }>;
+  };
+
   const handleAppLogin = (account: AppAccount) => {
     const normalizedAccount = {
       ...account,
       lines: normalizeLines(account.lines),
     };
-    localStorage.setItem(SESSION_STORAGE_KEY, normalizedAccount.username);
+    writeLocalStorageWithBackup(SESSION_STORAGE_KEY, normalizedAccount.username);
     setLineConfigs((prev) => mergeLineConfigs(prev, normalizedAccount.lines));
     setLastWashes((prev) => ({
       ...createLineDateMap(normalizedAccount.lines, null),
@@ -2794,6 +3172,7 @@ export default function App() {
 
   const handleAppLogout = () => {
     localStorage.removeItem(SESSION_STORAGE_KEY);
+    localStorage.removeItem(`${SESSION_STORAGE_KEY}${LOCAL_BACKUP_SUFFIX}`);
     setAppUser(null);
     setActivePage("dashboard");
   };
@@ -2812,6 +3191,60 @@ export default function App() {
         ));
       }
     }
+  };
+
+  const handleExportLocalBackup = () => {
+    const data: Record<string, string> = {};
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key || !isAppLocalDataKey(key)) continue;
+      const value = localStorage.getItem(key);
+      if (value !== null) data[key] = value;
+    }
+
+    const payload = {
+      app: "maizhanpiao-foil-planner",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      data,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `maizhanpiao-backup-${format(new Date(), "yyyy-MM-dd-HHmm")}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setLocalBackupMessage("已导出本地备份文件。");
+  };
+
+  const handleImportLocalBackup = (file?: File) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      try {
+        const payload = JSON.parse(String(reader.result || "{}"));
+        if (payload?.app !== "maizhanpiao-foil-planner" || !payload?.data || typeof payload.data !== "object") {
+          throw new Error("Invalid backup file");
+        }
+        Object.entries(payload.data as Record<string, string>).forEach(([key, value]) => {
+          if (isAppLocalDataKey(key) && typeof value === "string") {
+            localStorage.setItem(key, value);
+          }
+        });
+        setLocalBackupMessage("备份已导入，页面正在刷新。");
+        window.setTimeout(() => window.location.reload(), 500);
+      } catch {
+        setLocalBackupMessage("导入失败：请选择本工具导出的备份 JSON。");
+      } finally {
+        if (localBackupInputRef.current) localBackupInputRef.current.value = "";
+      }
+    });
+    reader.readAsText(file);
   };
 
   if (!appUser) {
@@ -2850,6 +3283,39 @@ export default function App() {
             <X size={20} />
           </button>
           <nav className="space-y-1.5">
+            <button
+              onClick={() => { setActivePage("dashboard"); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
+                activePage === "dashboard"
+                  ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
+                  : "hover:bg-slate-800 text-slate-300 hover:text-white",
+              )}
+            >
+              <LayoutDashboard size={16} /> 工作台指引
+            </button>
+            <button
+              onClick={() => { setActivePage("plan"); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
+                activePage === "plan"
+                  ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
+                  : "hover:bg-slate-800 text-slate-300 hover:text-white",
+              )}
+            >
+              <ListTodo size={16} /> 分卷计划
+            </button>
+            <button
+              onClick={() => { setActivePage("daily_record"); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
+                activePage === "daily_record"
+                  ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
+                  : "hover:bg-slate-800 text-slate-300 hover:text-white",
+              )}
+            >
+              <Calculator size={16} /> 当天独立数据记录
+            </button>
             {appUser.role === "admin" && (
               <button
                 onClick={() => { setActivePage("users"); setIsMobileMenuOpen(false); }}
@@ -2864,17 +3330,6 @@ export default function App() {
               </button>
             )}
             <button
-              onClick={() => { setActivePage("dashboard"); setIsMobileMenuOpen(false); }}
-              className={cn(
-                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
-                activePage === "dashboard"
-                  ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
-                  : "hover:bg-slate-800 text-slate-300 hover:text-white",
-              )}
-            >
-              <LayoutDashboard size={16} /> 工作台指引
-            </button>
-            <button
               onClick={() => { setActivePage("admin"); setIsMobileMenuOpen(false); }}
               className={cn(
                 "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
@@ -2884,17 +3339,6 @@ export default function App() {
               )}
             >
               <Database size={16} /> 数据后台
-            </button>
-            <button
-              onClick={() => { setActivePage("plan"); setIsMobileMenuOpen(false); }}
-              className={cn(
-                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
-                activePage === "plan"
-                  ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
-                  : "hover:bg-slate-800 text-slate-300 hover:text-white",
-              )}
-            >
-              <ListTodo size={16} /> 分卷计划
             </button>
             <button
               onClick={() => { setActivePage("settings"); setIsMobileMenuOpen(false); }}
@@ -2907,18 +3351,10 @@ export default function App() {
             >
               <Settings2 size={16} /> 设置
             </button>
-            <button 
-              onClick={() => { setActivePage("daily_record"); setIsMobileMenuOpen(false); }}
-              className={cn(
-                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
-                activePage === "daily_record"
-                  ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
-                  : "hover:bg-slate-800 text-slate-300 hover:text-white",
-              )}
+            <button
+              onClick={() => { setActivePage("dashboard"); setActiveTab("observe"); setIsMobileMenuOpen(false); }}
+              className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-slate-800 text-slate-300 hover:text-white rounded-lg text-[13px] font-semibold transition-all"
             >
-              <Calculator size={16} /> 当天独立数据记录
-            </button>
-            <button className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-slate-800 text-slate-300 hover:text-white rounded-lg text-[13px] font-semibold transition-all">
               <Activity size={16} /> 接头动态追踪
             </button>
             <button className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-slate-800 text-slate-300 hover:text-white rounded-lg text-[13px] font-semibold transition-all">
@@ -2949,12 +3385,34 @@ export default function App() {
               </p>
             </div>
           </div>
-          <button
-            onClick={user ? logOut : signIn}
-            className="mt-4 w-full text-[11px] font-bold text-slate-200 bg-slate-700 hover:bg-slate-600 rounded-lg px-3 py-2"
-          >
-            {user ? `退出云端保存 (${user.email})` : "登录 Google 保存数据"}
-          </button>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <button
+              onClick={handleExportLocalBackup}
+              className="flex items-center justify-center gap-1.5 text-[11px] font-bold text-emerald-200 bg-emerald-900/50 hover:bg-emerald-900 rounded-lg px-2 py-2"
+              type="button"
+            >
+              <Download size={13} /> 导出
+            </button>
+            <button
+              onClick={() => localBackupInputRef.current?.click()}
+              className="flex items-center justify-center gap-1.5 text-[11px] font-bold text-blue-200 bg-blue-900/50 hover:bg-blue-900 rounded-lg px-2 py-2"
+              type="button"
+            >
+              <Upload size={13} /> 恢复
+            </button>
+            <input
+              ref={localBackupInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(event) => handleImportLocalBackup(event.target.files?.[0])}
+            />
+          </div>
+          {localBackupMessage && (
+            <div className="mt-2 text-[10px] leading-snug font-bold text-slate-400">
+              {localBackupMessage}
+            </div>
+          )}
         </div>
       </aside>
 
@@ -3251,7 +3709,7 @@ export default function App() {
                           : tab === "splicing"
                             ? "接箔/架子作业"
                             : tab === "observe"
-                              ? "接头观测标定"
+                              ? "接头动态追踪"
                               : tab === "wash"
                                 ? "结晶冲洗"
                                 : "卸卷记录"}
@@ -3390,63 +3848,55 @@ export default function App() {
                               </div>
                               <div className="flex flex-col gap-1.5">
                                 {lineConfigs[selectedLine].futureRolls.map((fr, idx) => (
-                                  <div key={fr.id} className="flex justify-between items-center text-xs bg-slate-900/50 rounded flex-wrap gap-2 px-2.5 py-1.5 border border-slate-700/50 group">
-                                    <div className="flex flex-wrap items-center gap-3 w-max">
-                                      <span className="text-slate-500 font-bold font-mono">#{idx + 1}</span>
-                                      <span className="text-slate-300 font-mono">批号: {fr.batchNo}</span>
-                                      <span className="text-slate-500">|</span>
-                                      <span className="text-emerald-400 font-mono">总长: {fr.length} m</span>
+                                  <div key={fr.id} className="grid grid-cols-[auto_minmax(0,1fr)_110px_auto] items-end gap-2 text-xs bg-slate-900/50 rounded px-2.5 py-2 border border-slate-700/50">
+                                    <span className="text-slate-500 font-bold font-mono pb-2">#{idx + 1}</span>
+                                    <label className="min-w-0">
+                                      <span className="block text-[9px] text-slate-500 font-bold mb-1">批号</span>
+                                      <input
+                                        type="text"
+                                        value={fr.batchNo}
+                                        onChange={(e) =>
+                                          handleUpdateFutureRoll(selectedLine, fr.id, {
+                                            batchNo: e.target.value,
+                                          })
+                                        }
+                                        placeholder="未填写"
+                                        className="w-full bg-slate-950/70 border border-slate-700 rounded px-2 py-1.5 text-slate-200 font-mono outline-none focus:border-blue-400"
+                                      />
+                                    </label>
+                                    <label>
+                                      <span className="block text-[9px] text-slate-500 font-bold mb-1">总长(m)</span>
+                                      <input
+                                        type="number"
+                                        min="1"
+                                        step="1"
+                                        value={fr.length || ""}
+                                        onChange={(e) => {
+                                          if (e.target.value === "") return;
+                                          const nextLength = Number(e.target.value);
+                                          if (!Number.isFinite(nextLength) || nextLength <= 0) return;
+                                          handleUpdateFutureRoll(selectedLine, fr.id, {
+                                            length: nextLength,
+                                          });
+                                        }}
+                                        className="w-full bg-slate-950/70 border border-slate-700 rounded px-2 py-1.5 text-emerald-400 font-mono outline-none focus:border-blue-400"
+                                      />
+                                    </label>
+                                    <div className="pb-0.5">
+                                      <button
+                                        onClick={() => handleRemoveFutureRoll(fr.id)}
+                                        className="text-red-300 hover:text-white bg-red-950/40 hover:bg-red-600/80 border border-red-500/30 transition-colors p-2 rounded-lg"
+                                        title="删除该排队腐蚀箔"
+                                        type="button"
+                                      >
+                                        <Trash2 size={14} />
+                                      </button>
                                     </div>
-                                    <button
-                                      onClick={() => handleRemoveFutureRoll(fr.id)}
-                                      className="text-red-400 hover:text-red-300 opacity-0 group-hover:opacity-100 transition-opacity p-1"
-                                      title="移除该排队卷"
-                                    >
-                                      <Trash2 size={12} />
-                                    </button>
                                   </div>
                                 ))}
                               </div>
                             </div>
                           )}
-
-                          {/* Add Future queued roll */}
-                          <div className="col-span-2 mb-1 p-3 bg-slate-800/40 border border-slate-700/50 border-dashed rounded-lg">
-                            <div className="text-[10px] font-bold text-slate-400 uppercase mb-2">
-                              添加后续腐蚀箔
-                            </div>
-                            <div className="flex gap-2 relative">
-                              <input
-                                type="text"
-                                placeholder="批号 (如66767p)"
-                                value={forecastBatches[selectedLine] || ""}
-                                onChange={(e) =>
-                                  setForecastBatches(p => ({...p, [selectedLine]: e.target.value}))
-                                }
-                                className="w-[40%] bg-slate-900 border border-slate-700/60 rounded-lg px-2 py-1.5 text-xs text-white"
-                              />
-                              <input
-                                type="number"
-                                placeholder="长度(m)"
-                                value={forecastLengths[selectedLine] || ""}
-                                onChange={(e) =>
-                                  setForecastLengths(p => ({...p, [selectedLine]: e.target.value}))
-                                }
-                                className="w-[30%] bg-slate-900 border border-slate-700/60 rounded-lg px-2 py-1.5 text-xs text-white font-mono"
-                              />
-                              <button
-                                onClick={() => {
-                                  handleAddFutureRoll(selectedLine as LineId);
-                                  setForecastBatches(p => ({...p, [selectedLine]: ""}));
-                                  setForecastLengths(p => ({...p, [selectedLine]: ""}));
-                                }}
-                                disabled={!forecastBatches[selectedLine] || !forecastLengths[selectedLine]}
-                                className="w-[30%] bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:hover:bg-blue-600 text-white rounded-lg py-1.5 text-xs font-bold font-mono tracking-wider transition-colors flex justify-center items-center gap-1"
-                              >
-                                <Plus size={12} /> 加入
-                              </button>
-                            </div>
-                          </div>
 
                           {/* Completed Rolls Foldable Area */}
                           <div className="col-span-2 select-none">
@@ -3723,8 +4173,8 @@ export default function App() {
 
                           if (computed.length === 0) return null;
 
-                          const shiftStart = getCurrentShiftStart(currentTime);
-                          const shiftEnd = getCurrentShiftEnd(currentTime);
+                          const shiftStart = getCurrentShiftStart(scheduleTime);
+                          const shiftEnd = getCurrentShiftEnd(scheduleTime);
                           const maxMinutes = differenceInMinutes(shiftEnd, shiftStart);
 
                           const itemsToRender = computed;
@@ -3793,6 +4243,11 @@ export default function App() {
                                               部分或全部在下班产
                                             </span>
                                           )}
+                                          {r.isWarning && (
+                                            <span className="text-[10px] text-amber-400 mt-0.5">
+                                              特殊米数，已允许
+                                            </span>
+                                          )}
                                         </div>
                                       </div>
                                       <div className="flex items-center gap-2">
@@ -3800,24 +4255,18 @@ export default function App() {
                                           type="number"
                                           value={r.targetFormedLength}
                                           onChange={(e) => {
+                                            if (e.target.value === "") return;
                                             const n = Number(e.target.value);
-                                            const newRolls = [
-                                              ...lineConfigs[selectedLine]
-                                                .rolls,
-                                            ];
-                                            newRolls[i].targetFormedLength = n;
+                                            if (!Number.isFinite(n)) return;
                                             setLineConfigs((p) => ({
                                               ...p,
-                                              [selectedLine]: {
-                                                ...p[selectedLine],
-                                                rolls: newRolls,
-                                              },
+                                              [selectedLine]: updateRollTargetWithBorrow(p[selectedLine], i, n),
                                             }));
                                           }}
                                           className={cn(
                                             "w-20 bg-slate-950 border rounded p-1 text-center font-mono text-sm font-bold text-white outline-none",
                                             r.isWarning
-                                              ? "border-red-500/70 focus:border-red-500"
+                                              ? "border-amber-500/70 focus:border-amber-400"
                                               : "border-slate-600 focus:border-blue-400",
                                           )}
                                         />
@@ -4181,43 +4630,150 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Tab: Observe joint */}
+                  {/* Tab: Joint tracking */}
                   {activeTab === "observe" && (
                     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
                       <div className="bg-slate-800/80 p-5 rounded-2xl border border-slate-700">
                         <div className="mb-6">
                           <h4 className="text-sm font-bold text-slate-200">
-                            人工接头位置校准
+                            接头动态追踪
                           </h4>
                           <p className="text-[10px] text-slate-400 mt-1">
-                            当在产线上看到接头到达某个工艺段时，立即记录。这有助于系统反推工艺段长度及校准预测（因各线车速不同与工艺段变动）。
+                            依据当前车速和 240 米线体长度，推算接头每一分钟所在的槽和 U。
                           </p>
                         </div>
 
-                        <div className="space-y-4">
-                          <label className="text-xs font-bold text-slate-400">
-                            目前接头出现在哪个工艺环节？
-                          </label>
-                          <div className="grid grid-cols-2 gap-2">
-                            {STAGES.map((stage) => (
-                              <button
-                                key={stage}
-                                onClick={() => setObserveStage(stage)}
-                                className={cn(
-                                  "py-2.5 px-3 rounded-lg text-xs font-bold border transition-all text-left",
-                                  observeStage === stage
-                                    ? "bg-indigo-500/20 border-indigo-500 text-indigo-300"
-                                    : "bg-slate-900 border-slate-700 text-slate-400 hover:bg-slate-800",
-                                )}
-                              >
-                                {stage}
-                              </button>
-                            ))}
-                          </div>
+                        <div className="space-y-3">
+                          {(() => {
+                            const joints = getJointTrackingForLine(selectedLine);
+                            if (joints.length === 0) {
+                              return (
+                                <div className="rounded-xl border border-dashed border-slate-700 bg-slate-900/40 p-5 text-center text-xs font-bold text-slate-500">
+                                  当前规划里还没有接头任务。排产后，末端接头会自动出现在这里。
+                                </div>
+                              );
+                            }
 
-                          <button className="w-full mt-4 py-3.5 bg-indigo-600 hover:bg-indigo-500 text-white font-black text-sm rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20">
-                            <FastForward size={16} />
-                            记录接头到达 {observeStage}
+                            return joints.slice(0, 4).map((joint) => (
+                              <div key={joint.id} className="rounded-2xl border border-slate-700 bg-slate-900/50 p-4">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div>
+                                    <div className="text-[10px] font-black text-slate-500">接头任务 · {joint.lineId}#线</div>
+                                    <div className="mt-1 text-lg font-black text-white">
+                                      {joint.status === "追踪中"
+                                        ? `${joint.currentSlot?.name || "未知槽"} · U${joint.currentU}`
+                                        : joint.status}
+                                    </div>
+                                    <div className="mt-1 text-[11px] font-bold text-slate-400">
+                                      进入 {format(joint.startTime, "HH:mm")} · 出线 {format(joint.exitTime, "HH:mm")}
+                                    </div>
+                                  </div>
+                                  <div className={cn(
+                                    "rounded-xl px-3 py-2 text-right font-mono",
+                                    joint.status === "追踪中" ? "bg-emerald-500/10 text-emerald-300" : "bg-slate-800 text-slate-400",
+                                  )}>
+                                    <div className="text-xl font-black">{joint.clampedDistance.toFixed(1)}m</div>
+                                    <div className="text-[10px] font-bold">/ {joint.totalSlotLength.toFixed(0)}m</div>
+                                  </div>
+                                </div>
+
+                                <div className="mt-4 h-3 rounded-full bg-slate-800 overflow-hidden border border-slate-700">
+                                  <div
+                                    className="h-full bg-gradient-to-r from-orange-500 to-emerald-400"
+                                    style={{ width: `${Math.max(0, Math.min(100, joint.progress))}%` }}
+                                  />
+                                </div>
+
+                                <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] font-bold text-slate-400">
+                                  <div className="rounded-lg bg-slate-950/50 border border-slate-800 p-2">
+                                    当前槽内位置：{joint.inSlotDistance.toFixed(1)}m
+                                  </div>
+                                  <div className="rounded-lg bg-slate-950/50 border border-slate-800 p-2">
+                                    当前车速：{lineConfigs[selectedLine].speed} m/min
+                                  </div>
+                                </div>
+                              </div>
+                            ));
+                          })()}
+                        </div>
+                      </div>
+
+                      <div className="bg-slate-800/80 p-5 rounded-2xl border border-slate-700">
+                        <div className="flex items-center justify-between gap-3 mb-4">
+                          <div>
+                            <h4 className="text-sm font-bold text-slate-200">
+                              槽名称和 U 数管理
+                            </h4>
+                            <p className="text-[10px] text-slate-400 mt-1">
+                              槽长总和建议保持 240 米。U 数用于计算接头处于第几个 U。
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => resetJointSlots(selectedLine)}
+                            className="shrink-0 rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-[10px] font-black text-slate-300 hover:bg-slate-700"
+                          >
+                            恢复默认
+                          </button>
+                        </div>
+
+                        <div className="space-y-2">
+                          {(jointSlotConfigs[selectedLine] || []).map((slot, index) => (
+                            <div key={slot.id} className="grid grid-cols-[auto_minmax(0,1fr)_72px_58px_auto] gap-2 items-end rounded-xl bg-slate-900/50 border border-slate-700/60 p-2">
+                              <div className="pb-2 text-xs font-black text-slate-500">#{index + 1}</div>
+                              <label>
+                                <span className="block text-[9px] text-slate-500 font-bold mb-1">槽名</span>
+                                <input
+                                  value={slot.name}
+                                  onChange={(e) => updateJointSlot(selectedLine, slot.id, { name: e.target.value })}
+                                  className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 font-bold outline-none focus:border-blue-400"
+                                />
+                              </label>
+                              <label>
+                                <span className="block text-[9px] text-slate-500 font-bold mb-1">米</span>
+                                <input
+                                  type="number"
+                                  value={slot.length}
+                                  onChange={(e) => updateJointSlot(selectedLine, slot.id, { length: Number(e.target.value) })}
+                                  className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 font-mono outline-none focus:border-blue-400"
+                                />
+                              </label>
+                              <label>
+                                <span className="block text-[9px] text-slate-500 font-bold mb-1">U</span>
+                                <input
+                                  type="number"
+                                  value={slot.uCount}
+                                  onChange={(e) => updateJointSlot(selectedLine, slot.id, { uCount: Number(e.target.value) })}
+                                  className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 font-mono outline-none focus:border-blue-400"
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => removeJointSlot(selectedLine, slot.id)}
+                                className="mb-0.5 rounded-lg bg-red-950/40 border border-red-500/30 p-2 text-red-300 hover:bg-red-600/80 hover:text-white"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="mt-3 flex items-center justify-between gap-3">
+                          <div className={cn(
+                            "text-xs font-black",
+                            Math.abs((jointSlotConfigs[selectedLine] || []).reduce((sum, slot) => sum + Number(slot.length || 0), 0) - 240) <= 0.1
+                              ? "text-emerald-400"
+                              : "text-amber-400",
+                          )}>
+                            总长 {(jointSlotConfigs[selectedLine] || []).reduce((sum, slot) => sum + Number(slot.length || 0), 0).toFixed(1)}m / 240m
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => addJointSlot(selectedLine)}
+                            className="rounded-lg bg-blue-600 hover:bg-blue-500 px-3 py-2 text-xs font-black text-white flex items-center gap-1.5"
+                          >
+                            <Plus size={14} />
+                            加槽
                           </button>
                         </div>
                       </div>
@@ -4277,10 +4833,11 @@ export default function App() {
               </button>
             </div>
             <AdminDashboard
-              onLoadSnapshot={(configs, splicing, washes) => {
+              onLoadSnapshot={(configs, splicing, washes, jointSlots) => {
                 if (configs) setLineConfigs(configs);
                 if (splicing) setActiveSplicing(splicing);
                 if (washes) setLastWashes(washes);
+                if (jointSlots) setJointSlotConfigs(mergeJointSlotConfigs(jointSlots, lineAssignments));
                 setIsPlanningMode(true);
                 setActivePage("plan");
               }}
@@ -4305,7 +4862,7 @@ export default function App() {
                     分卷计划图表与编辑
                   </h2>
                   <div className="text-sm font-bold text-slate-500 mt-0.5">
-                    {format(getCurrentShiftStart(currentTime), "yyyy年MM月dd日")} · {getShiftInfo(getCurrentShiftStart(currentTime)).name} ({getShiftInfo(getCurrentShiftStart(currentTime)).timeStr})
+                    {format(getCurrentShiftStart(scheduleTime), "yyyy年MM月dd日")} · {getShiftInfo(getCurrentShiftStart(scheduleTime)).name} ({getShiftInfo(getCurrentShiftStart(scheduleTime)).timeStr})
                   </div>
                 </div>
               </div>
@@ -4321,14 +4878,13 @@ export default function App() {
                 updateConfig={(id, c) =>
                   setLineConfigs((prev) => ({ ...prev, [id]: c }))
                 }
-                currentTime={currentTime}
+                currentTime={scheduleTime}
+                nowTime={currentTime}
                 lines={activeLines}
-                isPlanningMode={isPlanningMode}
-                rollCompletionInputs={rollCompletionInputs}
-                setRollCompletionInputs={setRollCompletionInputs}
-                rollCompletionTimeInputs={rollCompletionTimeInputs}
-                setRollCompletionTimeInputs={setRollCompletionTimeInputs}
-                handleCompleteRoll={handleCompleteRoll}
+                activeSplicing={activeSplicing}
+                onStartRackCountdown={handleStartRackCountdown}
+                onAcknowledgeRackAlarm={handleAcknowledgeRackAlarm}
+                onConfirmJointPrepComplete={handleConfirmJointPrepComplete}
               />
             </div>
           </div>

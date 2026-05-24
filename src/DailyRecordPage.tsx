@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Plus, Trash2, ChevronLeft, Save, Calculator, Divide } from "lucide-react";
 import { cn } from "./lib/utils";
 
@@ -21,6 +21,28 @@ function createEmptyRecords(lines: string[]) {
   }, {});
 }
 
+const LOCAL_BACKUP_SUFFIX = "__backup";
+
+function readLocalWithBackup(key: string, legacyKey?: string) {
+  const keys = [key, `${key}${LOCAL_BACKUP_SUFFIX}`];
+  if (legacyKey && legacyKey !== key) {
+    keys.push(legacyKey, `${legacyKey}${LOCAL_BACKUP_SUFFIX}`);
+  }
+  for (const itemKey of keys) {
+    const value = localStorage.getItem(itemKey);
+    if (value !== null) {
+      if (itemKey !== key) localStorage.setItem(key, value);
+      return value;
+    }
+  }
+  return null;
+}
+
+function writeLocalWithBackup(key: string, value: string) {
+  localStorage.setItem(key, value);
+  localStorage.setItem(`${key}${LOCAL_BACKUP_SUFFIX}`, value);
+}
+
 export default function DailyRecordPage({
   setActivePage,
   lines,
@@ -37,21 +59,23 @@ export default function DailyRecordPage({
   const [shiftEndTime, setShiftEndTime] = useState<"20:00" | "08:00">("20:00");
   const [confirmedLines, setConfirmedLines] = useState<Record<string, boolean>>({});
   const [records, setRecords] = useState<Record<string, RollRecord[]>>(() => createEmptyRecords(lines));
+  const hydratedStorageKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
+    hydratedStorageKeyRef.current = null;
     try {
-      const savedRecords = localStorage.getItem(storageKey) || localStorage.getItem("daily_records_data");
+      const savedRecords = readLocalWithBackup(storageKey, "daily_records_data");
       if (savedRecords) {
         const parsed = JSON.parse(savedRecords);
         setRecords({ ...createEmptyRecords(lines), ...parsed });
       } else {
         setRecords(createEmptyRecords(lines));
       }
-      const savedShiftEndTime = localStorage.getItem(shiftStorageKey) || localStorage.getItem("daily_records_shift");
+      const savedShiftEndTime = readLocalWithBackup(shiftStorageKey, "daily_records_shift");
       if (savedShiftEndTime) {
         setShiftEndTime(savedShiftEndTime as "20:00" | "08:00");
       }
-      const savedConfirmedLines = localStorage.getItem(confirmedStorageKey) || localStorage.getItem("daily_records_confirmed");
+      const savedConfirmedLines = readLocalWithBackup(confirmedStorageKey, "daily_records_confirmed");
       if (savedConfirmedLines) {
         setConfirmedLines(JSON.parse(savedConfirmedLines));
       } else {
@@ -59,16 +83,19 @@ export default function DailyRecordPage({
       }
     } catch (e) {
       console.error("Failed to parse saved data from localStorage", e);
+    } finally {
+      hydratedStorageKeyRef.current = storageKey;
     }
   }, [lines, storageKey, shiftStorageKey, confirmedStorageKey]);
 
   const getLineRecords = (lineId: string) => records[lineId] || [];
 
   useEffect(() => {
+    if (hydratedStorageKeyRef.current !== storageKey) return;
     const timer = window.setTimeout(() => {
-      localStorage.setItem(storageKey, JSON.stringify(records));
-      localStorage.setItem(shiftStorageKey, shiftEndTime);
-      localStorage.setItem(confirmedStorageKey, JSON.stringify(confirmedLines));
+      writeLocalWithBackup(storageKey, JSON.stringify(records));
+      writeLocalWithBackup(shiftStorageKey, shiftEndTime);
+      writeLocalWithBackup(confirmedStorageKey, JSON.stringify(confirmedLines));
     }, 300);
     return () => window.clearTimeout(timer);
   }, [records, shiftEndTime, confirmedLines, storageKey, shiftStorageKey, confirmedStorageKey]);
@@ -218,9 +245,9 @@ export default function DailyRecordPage({
           </div>
           <button
             onClick={() => {
-              localStorage.setItem(storageKey, JSON.stringify(records));
-              localStorage.setItem(shiftStorageKey, shiftEndTime);
-              localStorage.setItem(confirmedStorageKey, JSON.stringify(confirmedLines));
+              writeLocalWithBackup(storageKey, JSON.stringify(records));
+              writeLocalWithBackup(shiftStorageKey, shiftEndTime);
+              writeLocalWithBackup(confirmedStorageKey, JSON.stringify(confirmedLines));
               alert("数据已暂存于本地内存中。");
             }}
             className="flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold text-sm transition-colors shadow-sm"
