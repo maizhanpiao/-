@@ -22,7 +22,6 @@ import {
   Package,
   Clock,
   AlertCircle,
-  Droplets,
   Wrench,
   Scissors,
   CheckSquare,
@@ -39,7 +38,10 @@ import {
   Flag,
   MapPin,
   Calculator,
+  Copy,
   Download,
+  FileText,
+  Share2,
   Upload,
   BellRing,
   Play
@@ -174,20 +176,17 @@ export function getCurrentShiftStart(time: Date) {
 }
 
 export function getPlanningShiftStart(time: Date) {
-  const h = time.getHours();
-  // 规划模式可以提前准备下一班；凌晨 0-8 点仍属于前一天夜班，不能提前切到白班。
-  if (h >= 8 && h < 17) {
-    const start = new Date(time);
-    start.setHours(8, 0, 0, 0);
-    return start;
-  } else {
-    const start = new Date(time);
-    if (h < 5) {
-      start.setDate(start.getDate() - 1);
-    }
-    start.setHours(20, 0, 0, 0);
-    return start;
-  }
+  const dataWindowMs = 20 * 60 * 60 * 1000;
+  const recentOwnShift = getRelevantShifts(time)
+    .filter((shift) => {
+      const elapsed = time.getTime() - shift.start.getTime();
+      return elapsed >= 0 && elapsed < dataWindowMs;
+    })
+    .sort((a, b) => b.start.getTime() - a.start.getTime())[0];
+
+  if (recentOwnShift) return new Date(recentOwnShift.start);
+
+  return getCurrentShiftStart(time);
 }
 
 export function getCurrentShiftEnd(time: Date) {
@@ -292,6 +291,7 @@ const ACCOUNT_STORAGE_KEY = "foil_app_accounts";
 const SESSION_STORAGE_KEY = "foil_app_session_user";
 const LOCAL_LINE_STATE_PREFIX = "foil_app_line_state";
 const DAILY_RECORD_PREFIX = "daily_records_data";
+const FULL_SNAPSHOT_PREFIX = "foil_app_full_snapshot";
 const LOCAL_RETENTION_DAYS = 14;
 const LOCAL_BACKUP_SUFFIX = "__backup";
 const MIN_MANUAL_FORMED_LENGTH = 1;
@@ -318,8 +318,17 @@ function isAppLocalDataKey(key: string) {
     key === SESSION_STORAGE_KEY ||
     key === "adminAuth" ||
     key.startsWith(`${LOCAL_LINE_STATE_PREFIX}:`) ||
+    key.startsWith(`${FULL_SNAPSHOT_PREFIX}:`) ||
     key.startsWith(`${DAILY_RECORD_PREFIX}_`) ||
     key.endsWith(LOCAL_BACKUP_SUFFIX)
+  );
+}
+
+function isPortableBackupDataKey(key: string) {
+  return (
+    isAppLocalDataKey(key) &&
+    !key.startsWith(`${FULL_SNAPSHOT_PREFIX}:`) &&
+    !key.endsWith(LOCAL_BACKUP_SUFFIX)
   );
 }
 
@@ -384,6 +393,7 @@ function getDefaultLineConfig(speed: number): LinePlanConfig {
     fPrevProduced: 0,
     batchNo: "",
     speed,
+    speedSegments: [],
     futureRolls: [],
     rolls: [],
     completedRolls: [],
@@ -411,6 +421,13 @@ function createJointSlotMap(lines: AssignedLine[]) {
   }, {});
 }
 
+function createJointCalibrationMap(lines: AssignedLine[]) {
+  return normalizeLines(lines).reduce<Record<LineId, JointCalibrationMark[]>>((acc, line) => {
+    acc[line.id] = [];
+    return acc;
+  }, {});
+}
+
 function mergeJointSlotConfigs(
   prev: Record<LineId, JointSlotConfig[]>,
   lines: AssignedLine[],
@@ -421,13 +438,27 @@ function mergeJointSlotConfigs(
   }, {});
 }
 
+function mergeJointCalibrationMarks(
+  prev: Record<LineId, JointCalibrationMark[]>,
+  lines: AssignedLine[],
+) {
+  return normalizeLines(lines).reduce<Record<LineId, JointCalibrationMark[]>>((acc, line) => {
+    acc[line.id] = Array.isArray(prev?.[line.id]) ? prev[line.id] : [];
+    return acc;
+  }, {});
+}
+
 function mergeLineConfigs(
   prev: Record<LineId, LinePlanConfig>,
   lines: AssignedLine[],
 ) {
   return normalizeLines(lines).reduce<Record<LineId, LinePlanConfig>>((acc, line) => {
     acc[line.id] = prev[line.id]
-      ? { ...prev[line.id], speed: Number(prev[line.id].speed) || line.speed }
+      ? {
+          ...prev[line.id],
+          speed: Number(prev[line.id].speed) || line.speed,
+          speedSegments: Array.isArray(prev[line.id].speedSegments) ? prev[line.id].speedSegments : [],
+        }
       : getDefaultLineConfig(line.speed);
     return acc;
   }, {});
@@ -482,6 +513,22 @@ function reviveSplicingTasks(raw: any): SplicingTask[] {
   }));
 }
 
+function reviveLineStatePayload(
+  parsed: any,
+  lines: AssignedLine[],
+) {
+  return {
+    lineConfigs: mergeLineConfigs(parsed?.lineConfigs || {}, lines),
+    activeSplicing: reviveSplicingTasks(parsed?.activeSplicing),
+    lastWashes: reviveDateMap(parsed?.lastWashes, lines),
+    jointSlotConfigs: mergeJointSlotConfigs(parsed?.jointSlotConfigs || {}, lines),
+    jointCalibrationMarks: mergeJointCalibrationMarks(parsed?.jointCalibrationMarks || {}, lines),
+    punchRecords: parsed?.punchRecords && typeof parsed.punchRecords === "object"
+      ? parsed.punchRecords
+      : {},
+  };
+}
+
 function reviveLocalLineState(
   raw: string | null,
   lines: AssignedLine[],
@@ -489,15 +536,7 @@ function reviveLocalLineState(
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
-    return {
-      lineConfigs: mergeLineConfigs(parsed.lineConfigs || {}, lines),
-      activeSplicing: reviveSplicingTasks(parsed.activeSplicing),
-      lastWashes: reviveDateMap(parsed.lastWashes, lines),
-      jointSlotConfigs: mergeJointSlotConfigs(parsed.jointSlotConfigs || {}, lines),
-      punchRecords: parsed.punchRecords && typeof parsed.punchRecords === "object"
-        ? parsed.punchRecords
-        : {},
-    };
+    return reviveLineStatePayload(parsed, lines);
   } catch (error) {
     console.error("Failed to restore local line state", error);
     return null;
@@ -510,6 +549,15 @@ interface JointSlotConfig {
   name: string;
   length: number;
   uCount: number;
+}
+
+interface JointCalibrationMark {
+  id: string;
+  slotId: string;
+  uIndex: number;
+  position: number;
+  markedAt: string;
+  jointId?: string;
 }
 
 const DEFAULT_JOINT_SLOTS: JointSlotConfig[] = [
@@ -549,6 +597,12 @@ interface FutureRoll {
   length: number;
 }
 
+interface SpeedSegment {
+  id: string;
+  startTime: string;
+  speed: number;
+}
+
 interface CompletedRoll {
   id: string;
   batchNo: string;
@@ -567,6 +621,7 @@ interface LinePlanConfig {
   fPrevProduced?: number;
   batchNo?: string;
   speed: number;
+  speedSegments?: SpeedSegment[];
   futureRolls?: FutureRoll[];
   completedRolls?: CompletedRoll[];
   rolls: PlannedRoll[];
@@ -613,6 +668,19 @@ function getMinimumManualTarget(config: LinePlanConfig, index: number) {
   return index === 0
     ? Math.max(MIN_MANUAL_FORMED_LENGTH, getFirstRollCarryIn(config))
     : MIN_MANUAL_FORMED_LENGTH;
+}
+
+function getDefaultFormedLengthRange(lineId: LineId) {
+  return lineId === "25"
+    ? { min: 300, max: 800 }
+    : { min: 400, max: 550 };
+}
+
+function getDefaultRangeStatus(lineId: LineId, length: number) {
+  const range = getDefaultFormedLengthRange(lineId);
+  if (length < range.min) return "low";
+  if (length > range.max) return "high";
+  return "ok";
 }
 
 function updateRollTargetWithBorrow(
@@ -728,6 +796,131 @@ function applyCompletedRollAccounting(
   };
 }
 
+function parseSegmentTimeOnShift(startTime: string, shiftStart: Date) {
+  const [hoursRaw, minutesRaw] = String(startTime || "").split(":").map(Number);
+  const hours = Number.isFinite(hoursRaw) ? hoursRaw : shiftStart.getHours();
+  const minutes = Number.isFinite(minutesRaw) ? minutesRaw : shiftStart.getMinutes();
+  const result = new Date(shiftStart);
+  result.setHours(hours, minutes, 0, 0);
+  if (result.getTime() < shiftStart.getTime()) {
+    result.setDate(result.getDate() + 1);
+  }
+  return result;
+}
+
+function getSpeedSchedule(config: LinePlanConfig, shiftStart: Date) {
+  const baseSpeed = Number(config.speed) > 0 ? Number(config.speed) : 1;
+  const base = {
+    id: "base",
+    startTime: new Date(shiftStart),
+    speed: baseSpeed,
+  };
+  const segments = (config.speedSegments || [])
+    .filter((segment) => Number(segment.speed) > 0 && /^\d{2}:\d{2}$/.test(segment.startTime))
+    .map((segment) => ({
+      id: segment.id,
+      startTime: parseSegmentTimeOnShift(segment.startTime, shiftStart),
+      speed: Number(segment.speed),
+    }))
+    .filter((segment) => segment.startTime.getTime() >= shiftStart.getTime());
+
+  return [base, ...segments].sort((a, b) => a.startTime.getTime() - b.startTime.getTime());
+}
+
+function getSpeedAtTime(config: LinePlanConfig, time: Date, shiftStart = getCurrentShiftStart(time)) {
+  const schedule = getSpeedSchedule(config, shiftStart);
+  let current = schedule[0]?.speed || Number(config.speed) || 1;
+  for (const segment of schedule) {
+    if (segment.startTime.getTime() <= time.getTime()) {
+      current = segment.speed;
+    } else {
+      break;
+    }
+  }
+  return current;
+}
+
+function addDistanceWithSpeed(
+  startTime: Date,
+  distance: number,
+  config: LinePlanConfig,
+  shiftStart = getCurrentShiftStart(startTime),
+) {
+  if (!Number.isFinite(distance) || distance <= 0) return new Date(startTime);
+  let cursor = new Date(startTime);
+  let remaining = distance;
+  const schedule = getSpeedSchedule(config, shiftStart);
+
+  for (let guard = 0; guard < 100; guard += 1) {
+    const speed = Math.max(0.01, getSpeedAtTime(config, cursor, shiftStart));
+    const nextSegment = schedule.find((segment) => segment.startTime.getTime() > cursor.getTime());
+    if (!nextSegment) {
+      return addMinutes(cursor, remaining / speed);
+    }
+    const minutesToNext = Math.max(0, (nextSegment.startTime.getTime() - cursor.getTime()) / 60000);
+    const distanceToNext = minutesToNext * speed;
+    if (remaining <= distanceToNext) {
+      return addMinutes(cursor, remaining / speed);
+    }
+    remaining -= distanceToNext;
+    cursor = new Date(nextSegment.startTime);
+  }
+  return addMinutes(cursor, remaining / Math.max(0.01, Number(config.speed) || 1));
+}
+
+function distanceBetweenWithSpeed(
+  startTime: Date,
+  endTime: Date,
+  config: LinePlanConfig,
+  shiftStart = getCurrentShiftStart(startTime),
+) {
+  if (endTime.getTime() <= startTime.getTime()) return 0;
+  let cursor = new Date(startTime);
+  let distance = 0;
+  const schedule = getSpeedSchedule(config, shiftStart);
+
+  for (let guard = 0; guard < 100 && cursor.getTime() < endTime.getTime(); guard += 1) {
+    const speed = Math.max(0.01, getSpeedAtTime(config, cursor, shiftStart));
+    const nextSegment = schedule.find((segment) => segment.startTime.getTime() > cursor.getTime());
+    const stop = nextSegment && nextSegment.startTime.getTime() < endTime.getTime()
+      ? nextSegment.startTime
+      : endTime;
+    distance += ((stop.getTime() - cursor.getTime()) / 60000) * speed;
+    cursor = new Date(stop);
+  }
+  return distance;
+}
+
+function subtractDistanceWithSpeed(
+  endTime: Date,
+  distance: number,
+  config: LinePlanConfig,
+  shiftStart = getCurrentShiftStart(endTime),
+) {
+  if (!Number.isFinite(distance) || distance <= 0) return new Date(endTime);
+  let cursor = new Date(endTime);
+  let remaining = distance;
+  const schedule = getSpeedSchedule(config, shiftStart);
+
+  for (let guard = 0; guard < 100; guard += 1) {
+    const speed = Math.max(0.01, getSpeedAtTime(config, addMinutes(cursor, -0.01), shiftStart));
+    const previousSegment = [...schedule]
+      .reverse()
+      .find((segment) => segment.startTime.getTime() < cursor.getTime());
+    const stop = previousSegment && previousSegment.startTime.getTime() > shiftStart.getTime()
+      ? previousSegment.startTime
+      : shiftStart;
+    const minutesToStop = Math.max(0, (cursor.getTime() - stop.getTime()) / 60000);
+    const distanceToStop = minutesToStop * speed;
+    if (remaining <= distanceToStop || stop.getTime() <= shiftStart.getTime()) {
+      return addMinutes(cursor, -(remaining / speed));
+    }
+    remaining -= distanceToStop;
+    cursor = new Date(stop);
+  }
+  return addMinutes(cursor, -(remaining / Math.max(0.01, Number(config.speed) || 1)));
+}
+
 function TaskCountdownCard({
   currentTime,
   nowTime,
@@ -783,14 +976,12 @@ function TaskCountdownCard({
       config.rolls.forEach((roll, index) => {
         const consumed = getRollCorrosionConsumed(roll, index, config);
         accC += consumed;
-        const endTime = addMinutes(currentTime, accC / config.speed);
+        const endTime = addDistanceWithSpeed(currentTime, accC, config, currentTime);
         if (roll.isJoint) {
           const jointPrepHandled = activeSplicing.some(
             (task) => task.line === lineId && task.sourceRollId === roll.id,
           );
-          const frontStartTime = new Date(
-            endTime.getTime() - (240 / config.speed) * 60000,
-          );
+          const frontStartTime = addDistanceWithSpeed(currentTime, Math.max(0, accC - 240), config, currentTime);
           if (!jointPrepHandled && frontStartTime.getTime() >= nowTime.getTime()) {
             candidates.push({
               id: `joint-${lineId}-${roll.id}`,
@@ -967,7 +1158,7 @@ function CombinedPlanTimeline({
     <div className="mb-6 flex flex-col gap-6 w-full max-w-full">
       {/* The Unified Timeline Chart */}
       <div className="-mx-4 sm:mx-0 w-[calc(100%+32px)] sm:w-full overflow-x-auto hide-scrollbar sm:rounded-xl border-y sm:border border-slate-200 bg-slate-50 sm:shadow-inner relative z-0">
-        <div className="relative w-full min-w-[920px] text-slate-700 py-4 sm:py-6 pl-2 pr-2 sm:px-0">
+        <div className="relative w-full text-slate-700 py-4 sm:py-6 pl-2 pr-2 sm:px-0">
           
           <div className="absolute top-0 bottom-0 left-4 right-4 pointer-events-none z-0">
             {/* Ticks */}
@@ -1354,8 +1545,35 @@ function DraggableTimelineLine({
   const [editingRollIdx, setEditingRollIdx] = useState<number | null>(null);
   const [deleteConfirmIdx, setDeleteConfirmIdx] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [rangeFlashByIdx, setRangeFlashByIdx] = useState<Record<number, number>>({});
+  const lastRangeStatusRef = useRef<Record<number, string>>({});
 
   const currMinutesFromStart = differenceInMinutes(currentTime, shiftStart);
+  const triggerRangeReminder = (rollIdx: number) => {
+    const token = Date.now();
+    setRangeFlashByIdx((prev) => ({ ...prev, [rollIdx]: token }));
+    navigator.vibrate?.([18, 30, 18]);
+    window.setTimeout(() => {
+      setRangeFlashByIdx((prev) => {
+        if (prev[rollIdx] !== token) return prev;
+        const next = { ...prev };
+        delete next[rollIdx];
+        return next;
+      });
+    }, 700);
+  };
+
+  const checkRangeBoundaryReminder = (rollIdx: number, length: number) => {
+    const status = getDefaultRangeStatus(lineId, length);
+    const previousStatus =
+      lastRangeStatusRef.current[rollIdx] ??
+      getDefaultRangeStatus(lineId, Number(config.rolls[rollIdx]?.targetFormedLength || 0));
+    lastRangeStatusRef.current[rollIdx] = status;
+
+    if (status !== "ok" && previousStatus !== status) {
+      triggerRangeReminder(rollIdx);
+    }
+  };
 
   useEffect(() => {
     const handleMove = (e: PointerEvent) => {
@@ -1369,8 +1587,9 @@ function DraggableTimelineLine({
 
       // Convert time back to cumulative length
       const firstCarryIn = getFirstRollCarryIn(config);
+      const cursorTime = addMinutes(shiftStart, cursorMinutesFromStart);
       const newCumulative =
-        (cursorMinutesFromStart - currMinutesFromStart) * config.speed +
+        distanceBetweenWithSpeed(currentTime, cursorTime, config, shiftStart) +
         firstCarryIn;
 
       const prevH = draggingIdx === 0 ? 0 : cumSum[draggingIdx - 1];
@@ -1402,6 +1621,8 @@ function DraggableTimelineLine({
         ...newRolls[draggingIdx + 1],
         targetFormedLength: nextH - clampedNewCum,
       };
+      checkRangeBoundaryReminder(draggingIdx, newRolls[draggingIdx].targetFormedLength);
+      checkRangeBoundaryReminder(draggingIdx + 1, newRolls[draggingIdx + 1].targetFormedLength);
 
       updateConfig(lineId, { ...config, rolls: newRolls });
     };
@@ -1437,10 +1658,12 @@ function DraggableTimelineLine({
       {getUnloadedCompletedRolls(config.completedRolls || []).map((cr: any, i: number) => {
         const endTime = new Date(cr.unrollTime);
         const endMinutesFromStart = differenceInMinutes(endTime, shiftStart);
-        const startMinutesFromStart = endMinutesFromStart - cr.length / config.speed;
+        const startTime = subtractDistanceWithSpeed(endTime, cr.length, config, shiftStart);
+        const startMinutesFromStart = differenceInMinutes(startTime, shiftStart);
+        const durationMinutes = Math.max(0, endMinutesFromStart - startMinutesFromStart);
         
         const pctLeft = (startMinutesFromStart / maxMinutes) * 100;
-        const pctWidth = ((cr.length / config.speed) / maxMinutes) * 100;
+        const pctWidth = (durationMinutes / maxMinutes) * 100;
         
         return (
           <div
@@ -1466,12 +1689,11 @@ function DraggableTimelineLine({
         const currLength = prevLength + roll.targetFormedLength;
         const firstCarryIn = getFirstRollCarryIn(config);
 
-        const startTimeFromNow = (prevLength - firstCarryIn) / config.speed;
-        const endTimeFromNow = (currLength - firstCarryIn) / config.speed;
+        const startTime = addDistanceWithSpeed(currentTime, prevLength - firstCarryIn, config, shiftStart);
+        const endTime = addDistanceWithSpeed(currentTime, currLength - firstCarryIn, config, shiftStart);
 
-        const startMinutesFromShiftStart =
-          currMinutesFromStart + startTimeFromNow;
-        const endMinutesFromShiftStart = currMinutesFromStart + endTimeFromNow;
+        const startMinutesFromShiftStart = differenceInMinutes(startTime, shiftStart);
+        const endMinutesFromShiftStart = differenceInMinutes(endTime, shiftStart);
 
         const pctLeft = (startMinutesFromShiftStart / maxMinutes) * 100;
         const pctWidth =
@@ -1480,6 +1702,9 @@ function DraggableTimelineLine({
           100;
 
         const isPoppedOut = pctWidth < 20;
+        const rangeStatus = getDefaultRangeStatus(lineId, Number(roll.targetFormedLength || 0));
+        const isRangeWarning = rangeStatus !== "ok";
+        const isRangeFlashing = Boolean(rangeFlashByIdx[i]);
 
         return (
           <div
@@ -1487,6 +1712,8 @@ function DraggableTimelineLine({
             className={cn(
               "absolute top-0 bottom-0 border-r border-white group pointer-events-none",
               roll.isJoint && "z-20",
+              isRangeWarning && "ring-2 ring-red-500/70 ring-inset",
+              isRangeFlashing && "foil-range-warning-flash",
             )}
             style={{
               left: `${pctLeft}%`,
@@ -1547,6 +1774,7 @@ function DraggableTimelineLine({
                         onBlur={() => {
                           let val = parseFloat(editValue);
                           if (!isNaN(val) && val !== roll.targetFormedLength) {
+                            checkRangeBoundaryReminder(i, val);
                             updateConfig(lineId, updateRollTargetWithBorrow(config, i, val));
                           }
                           // Note: we can't clear setEditingRollIdx(null) onBlur because it blocks click events on the Plus/Trash icons.
@@ -1676,6 +1904,11 @@ function DraggableTimelineLine({
                     <span className={cn("font-black truncate", isPoppedOut ? "text-xs" : "text-[10px]", roll.isJoint ? "text-orange-900/80" : "text-blue-900/80")}>
                       {roll.targetFormedLength.toFixed(1)}m
                     </span>
+                    {isRangeWarning && (
+                      <span className="text-[8px] sm:text-[9px] font-black text-red-600 leading-none mt-0.5 truncate">
+                        超默认范围
+                      </span>
+                    )}
                     
                     {(() => {
                       if (startMinutesFromShiftStart > shiftMinutes) {
@@ -1690,8 +1923,7 @@ function DraggableTimelineLine({
                       let inShift = roll.targetFormedLength - carryIn;
                       
                       if (endMinutesFromShiftStart > shiftMinutes) {
-                         const spillMins = endMinutesFromShiftStart - shiftMinutes;
-                         const spillLength = spillMins * config.speed;
+                         const spillLength = distanceBetweenWithSpeed(addMinutes(shiftStart, shiftMinutes), endTime, config, shiftStart);
                          inShift = Math.max(0, inShift - spillLength);
                          
                          return (
@@ -1719,20 +1951,21 @@ function DraggableTimelineLine({
       })}
 
       {cumSum.slice(0, -1).map((h: number, i: number) => {
-        const minutesElapsed = (h - getFirstRollCarryIn(config)) / config.speed;
+        const nodeTime = addDistanceWithSpeed(currentTime, h - getFirstRollCarryIn(config), config, shiftStart);
+        const minutesElapsed = differenceInMinutes(nodeTime, currentTime);
         const minutesFromShiftStart = currMinutesFromStart + minutesElapsed;
         const leftPct = (minutesFromShiftStart / maxMinutes) * 100;
-        const nodeTime = addMinutes(currentTime, minutesElapsed);
         const isJoint = config.rolls[i].isJoint;
         const isDraggable = !isJoint;
+        const isBoundaryFlashing = Boolean(rangeFlashByIdx[i] || rangeFlashByIdx[i + 1]);
         
         let frontStartLeftPct = 0;
         let frontStartTime = new Date();
         if (isJoint) {
-          const frontStartMins = minutesElapsed - 240 / config.speed;
-          const frontStartFromShiftStart = currMinutesFromStart + frontStartMins;
+          const frontStartTimeForNode = addDistanceWithSpeed(currentTime, Math.max(0, h - getFirstRollCarryIn(config) - 240), config, shiftStart);
+          const frontStartFromShiftStart = differenceInMinutes(frontStartTimeForNode, shiftStart);
           frontStartLeftPct = (frontStartFromShiftStart / maxMinutes) * 100;
-          frontStartTime = addMinutes(currentTime, frontStartMins);
+          frontStartTime = frontStartTimeForNode;
         }
 
         return (
@@ -1775,6 +2008,7 @@ function DraggableTimelineLine({
                   draggingIdx === i
                     ? "bg-blue-600"
                     : (isDraggable ? "bg-white border border-slate-300" : "bg-red-500 border border-red-600 shadow-red-500/50 z-10"),
+                  isBoundaryFlashing && "foil-range-warning-handle",
                 )}
               >
                 {isJoint && (
@@ -1860,9 +2094,6 @@ function AppLoginScreen({
         >
           登录
         </button>
-        <div className="text-[11px] text-slate-400 font-bold border-t border-slate-100 pt-3">
-          管理员默认账号: admin / admin12345
-        </div>
       </form>
     </div>
   );
@@ -2103,7 +2334,7 @@ export default function App() {
   const [simDateStr, setSimDateStr] = useState("");
   const [simTimeStr, setSimTimeStr] = useState("");
 
-  const [activePage, setActivePage] = useState<"dashboard" | "plan" | "admin" | "settings" | "daily_record" | "users">("dashboard");
+  const [activePage, setActivePage] = useState<"dashboard" | "plan" | "admin" | "settings" | "daily_record" | "users" | "joint_tracking">("dashboard");
 
   // -- Shift info --
   const shiftInfo = getShiftInfo(currentTime);
@@ -2204,6 +2435,9 @@ export default function App() {
   const [jointSlotConfigs, setJointSlotConfigs] = useState<Record<LineId, JointSlotConfig[]>>(() =>
     createJointSlotMap(lineAssignments),
   );
+  const [jointCalibrationMarks, setJointCalibrationMarks] = useState<Record<LineId, JointCalibrationMark[]>>(() =>
+    createJointCalibrationMap(lineAssignments),
+  );
 
   // -- line config states --
   const [lineConfigs, setLineConfigs] = useState<
@@ -2213,11 +2447,12 @@ export default function App() {
   // -- form states --
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<
-    "plan" | "forecast" | "splicing" | "wash" | "unroll" | "observe"
+    "plan" | "forecast" | "splicing" | "unroll"
   >("plan");
   const [selectedLine, setSelectedLine] = useState<LineId>(activeLines[0]);
 
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [planSuccess, setPlanSuccess] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState<{title: string, message: string, onConfirm: () => void} | null>(null);
   const [addFoilDialog, setAddFoilDialog] = useState<boolean>(false);
   const [addFoilBatch, setAddFoilBatch] = useState<string>("");
@@ -2229,6 +2464,12 @@ export default function App() {
   const [showOnlyJointPrep, setShowOnlyJointPrep] = useState(false);
   const [showCompletedRolls, setShowCompletedRolls] = useState(false);
   const [localBackupMessage, setLocalBackupMessage] = useState("");
+  const [backupExportDialog, setBackupExportDialog] = useState<{
+    fileName: string;
+    content: string;
+  } | null>(null);
+  const [showBackupTextImport, setShowBackupTextImport] = useState(false);
+  const [backupImportText, setBackupImportText] = useState("");
   const [rollCompletionInputs, setRollCompletionInputs] = useState<Record<LineId, string>>(() =>
     createLineDateMap(lineAssignments, ""),
   );
@@ -2307,8 +2548,14 @@ export default function App() {
       ),
     }));
     setJointSlotConfigs((prev) => mergeJointSlotConfigs(prev, lineAssignments));
+    setJointCalibrationMarks((prev) => mergeJointCalibrationMarks(prev, lineAssignments));
     setSelectedLine((prev) => (activeLines.includes(prev) ? prev : activeLines[0]));
   }, [activeLines, lineAssignments]);
+
+  useEffect(() => {
+    if (!appUser) return;
+    void navigator.storage?.persist?.();
+  }, [appUser]);
 
   useEffect(() => {
     if (!appUser) return;
@@ -2322,10 +2569,12 @@ export default function App() {
       setActiveSplicing(restored.activeSplicing);
       setLastWashes(restored.lastWashes);
       setJointSlotConfigs(restored.jointSlotConfigs);
+      setJointCalibrationMarks(restored.jointCalibrationMarks);
       setPunchRecords(restored.punchRecords);
     } else {
       setLineConfigs((prev) => mergeLineConfigs(prev, lineAssignments));
       setJointSlotConfigs((prev) => mergeJointSlotConfigs(prev, lineAssignments));
+      setJointCalibrationMarks((prev) => mergeJointCalibrationMarks(prev, lineAssignments));
       setLastWashes((prev) => ({
         ...createLineDateMap(lineAssignments, null),
         ...Object.fromEntries(
@@ -2348,12 +2597,13 @@ export default function App() {
         activeSplicing,
         lastWashes,
         jointSlotConfigs,
+        jointCalibrationMarks,
         punchRecords,
         savedAt: new Date().toISOString(),
       }));
     }, 300);
     return () => clearTimeout(timer);
-  }, [lineConfigs, activeSplicing, lastWashes, jointSlotConfigs, punchRecords, appUser, dateKey]);
+  }, [lineConfigs, activeSplicing, lastWashes, jointSlotConfigs, jointCalibrationMarks, punchRecords, appUser, dateKey]);
 
   useEffect(() => {
     if (!user) return;
@@ -2412,6 +2662,12 @@ export default function App() {
               return currentStr !== data.jointSlotConfigs ? mergeJointSlotConfigs(JSON.parse(data.jointSlotConfigs), lineAssignments) : prev;
             });
           }
+          if (data.jointCalibrationMarks) {
+             setJointCalibrationMarks(prev => {
+              const currentStr = JSON.stringify(prev);
+              return currentStr !== data.jointCalibrationMarks ? mergeJointCalibrationMarks(JSON.parse(data.jointCalibrationMarks), lineAssignments) : prev;
+            });
+          }
         } catch(e) {
           handleFirestoreError(e, OperationType.GET, path);
         }
@@ -2440,6 +2696,7 @@ export default function App() {
           activeSplicing: JSON.stringify(activeSplicing),
           lastWashes: JSON.stringify(lastWashes),
           jointSlotConfigs: JSON.stringify(jointSlotConfigs),
+          jointCalibrationMarks: JSON.stringify(jointCalibrationMarks),
           updatedAt: serverTimestamp()
         }, { merge: true });
       } catch (e) {
@@ -2448,7 +2705,7 @@ export default function App() {
     };
     const timer = setTimeout(saveState, 500);
     return () => clearTimeout(timer);
-  }, [lineConfigs, activeSplicing, lastWashes, jointSlotConfigs, user, dateKey]);
+  }, [lineConfigs, activeSplicing, lastWashes, jointSlotConfigs, jointCalibrationMarks, user, dateKey]);
 
   // debounce writes to firestore for punchRecords
   useEffect(() => {
@@ -2536,8 +2793,12 @@ export default function App() {
         (sum, cr) => sum + (cr.isManual ? 0 : getCompletedRollCorrosionConsumed(cr)),
         0,
       );
-      const minsSinceUnroll = Math.max(0, differenceInMinutes(currentTime, unrollDate));
-      const newFProduced = minsSinceUnroll * c.speed;
+      const newFProduced = distanceBetweenWithSpeed(
+        unrollDate,
+        currentTime,
+        c,
+        getCurrentShiftStart(unrollDate),
+      );
 
       return {
         ...p,
@@ -2767,10 +3028,6 @@ export default function App() {
     );
   };
 
-  const handleRecordWash = () => {
-    setLastWashes((prev) => ({ ...prev, [selectedLine]: currentTime }));
-  };
-
   const updateJointSlot = (
     lineId: LineId,
     slotId: string,
@@ -2813,6 +3070,34 @@ export default function App() {
       ...prev,
       [lineId]: normalizeJointSlots(),
     }));
+    setJointCalibrationMarks((prev) => ({ ...prev, [lineId]: [] }));
+  };
+
+  const markJointUPosition = (lineId: LineId, jointId: string, slotId: string, uIndex: number) => {
+    const joint = getJointTrackingForLine(lineId).find((item) => item.id === jointId);
+    if (!joint) return;
+    const nextMark: JointCalibrationMark = {
+      id: `${slotId}:${uIndex}`,
+      slotId,
+      uIndex,
+      position: Number(joint.clampedDistance.toFixed(2)),
+      markedAt: currentTime.toISOString(),
+      jointId,
+    };
+    setJointCalibrationMarks((prev) => ({
+      ...prev,
+      [lineId]: [
+        ...(prev[lineId] || []).filter((mark) => !(mark.slotId === slotId && mark.uIndex === uIndex)),
+        nextMark,
+      ],
+    }));
+  };
+
+  const clearJointUPosition = (lineId: LineId, slotId: string, uIndex: number) => {
+    setJointCalibrationMarks((prev) => ({
+      ...prev,
+      [lineId]: (prev[lineId] || []).filter((mark) => !(mark.slotId === slotId && mark.uIndex === uIndex)),
+    }));
   };
 
   // derived state for Splicing Tasks
@@ -2827,13 +3112,15 @@ export default function App() {
     let urgency = "normal";
     let progress = 0;
 
-    if (rackDueAt && !task.rackAlarmAcknowledged) {
-      displayStatus =
-        rackRemainingMinutes !== null && rackRemainingMinutes > 0
-          ? `过架子倒计时 (${rackRemainingMinutes}m)`
-          : "过架子时间到";
-      urgency = rackRemainingMinutes !== null && rackRemainingMinutes <= 0 ? "critical" : "warning";
-      progress = 100;
+	    if (rackDueAt && !task.rackAlarmAcknowledged) {
+	      displayStatus =
+	        rackRemainingMinutes !== null && rackRemainingMinutes > 0
+	          ? `过架子倒计时 (${rackRemainingMinutes}m)`
+	          : "过架子时间到";
+	      urgency = rackRemainingMinutes !== null && rackRemainingMinutes <= 0 ? "critical" : "warning";
+	      const rackStart = task.rackTimerStartedAt ? new Date(task.rackTimerStartedAt) : task.startTime;
+	      const rackTotalMs = Math.max(1, rackDueAt.getTime() - rackStart.getTime());
+	      progress = Math.max(0, Math.min(100, ((currentTime.getTime() - rackStart.getTime()) / rackTotalMs) * 100));
     } else if (minElapsed < 30) {
       displayStatus = `接箔作业 (${30 - minElapsed}m 剩余)`;
       progress = (minElapsed / 30) * 100;
@@ -2873,7 +3160,7 @@ export default function App() {
         currentLineConfigs[l].rolls.forEach((r, i) => {
           const cConsum = getRollCorrosionConsumed(r, i, currentLineConfigs[l]);
           accC += cConsum;
-          const endT = addMinutes(scheduleTime, accC / currentLineConfigs[l].speed);
+          const endT = addDistanceWithSpeed(scheduleTime, accC, currentLineConfigs[l], scheduleTime);
           otherRollTimes.push(endT.getTime());
         });
       }
@@ -2904,7 +3191,7 @@ export default function App() {
           if (cConsum < 0) cConsum = 0;
           accForFoil += cConsum;
 
-          const endTime = addMinutes(scheduleTime, (globalAccC + accForFoil) / conf.speed);
+          const endTime = addDistanceWithSpeed(scheduleTime, globalAccC + accForFoil, conf, scheduleTime);
           const endMs = endTime.getTime();
           const shiftEndMs = shiftEnd.getTime();
 
@@ -3044,10 +3331,10 @@ export default function App() {
     let accC = 0;
     return config.rolls.map((roll, i) => {
       const startT =
-        i === 0 ? scheduleTime : addMinutes(scheduleTime, accC / config.speed);
+        i === 0 ? scheduleTime : addDistanceWithSpeed(scheduleTime, accC, config, scheduleTime);
       const cConsum = getRollCorrosionConsumed(roll, i, config);
       accC += cConsum;
-      const endT = addMinutes(scheduleTime, accC / config.speed);
+      const endT = addDistanceWithSpeed(scheduleTime, accC, config, scheduleTime);
       const meal = checkMealConflict(endT, mealConfig);
       const isWarning =
         (lineId === "25" &&
@@ -3057,6 +3344,7 @@ export default function App() {
       return {
         ...roll,
         corrosionConsumed: cConsum,
+        cumulativeCorrosion: accC,
         startTime: startT,
         endTime: endT,
         meal,
@@ -3065,10 +3353,90 @@ export default function App() {
     });
   };
 
+  const getJointUPointsForLine = (lineId: LineId) => {
+    const slots = normalizeJointSlots(jointSlotConfigs[lineId]);
+    const configuredTotal = slots.reduce((sum, slot) => sum + Number(slot.length || 0), 0) || 240;
+    let cursor = 0;
+    return slots.flatMap((slot, slotIndex) => {
+      const slotLength = Number(slot.length || 0);
+      const points = Array.from({ length: Math.max(1, Number(slot.uCount || 1)) }, (_, idx) => {
+        const nominalPosition = cursor + ((idx + 0.5) / Math.max(1, slot.uCount)) * slotLength;
+        return {
+          key: `${slot.id}:${idx + 1}`,
+          slot,
+          slotIndex,
+          uIndex: idx + 1,
+          nominalPosition: configuredTotal > 0 ? (nominalPosition / configuredTotal) * 240 : nominalPosition,
+        };
+      });
+      cursor += slotLength;
+      return points;
+    });
+  };
+
+  const getCalibratedUPointsForLine = (lineId: LineId) => {
+    const points = getJointUPointsForLine(lineId);
+    const marks = jointCalibrationMarks[lineId] || [];
+    const markMap = new Map<string, JointCalibrationMark>(marks.map((mark) => [`${mark.slotId}:${mark.uIndex}`, mark]));
+    const seeded = points.map((point) => {
+      const mark = markMap.get(point.key);
+      return {
+        ...point,
+        measuredPosition: mark ? Math.max(0, Math.min(240, Number(mark.position || 0))) : null,
+        markedAt: mark?.markedAt,
+        jointId: mark?.jointId,
+      };
+    });
+
+    return seeded.map((point, index) => {
+      if (point.measuredPosition !== null) {
+        return { ...point, position: point.measuredPosition, calibrated: true };
+      }
+
+      const prev = [...seeded.slice(0, index)].reverse().find((item) => item.measuredPosition !== null);
+      const next = seeded.slice(index + 1).find((item) => item.measuredPosition !== null);
+      let position = point.nominalPosition;
+
+      if (prev && next && next.nominalPosition !== prev.nominalPosition) {
+        const ratio = (point.nominalPosition - prev.nominalPosition) / (next.nominalPosition - prev.nominalPosition);
+        position = Number(prev.measuredPosition) + ratio * (Number(next.measuredPosition) - Number(prev.measuredPosition));
+      } else if (prev) {
+        position = Number(prev.measuredPosition) + (point.nominalPosition - prev.nominalPosition);
+      } else if (next) {
+        position = Number(next.measuredPosition) - (next.nominalPosition - point.nominalPosition);
+      }
+
+      return {
+        ...point,
+        position: Math.max(0, Math.min(240, position)),
+        calibrated: false,
+      };
+    }).sort((a, b) => a.position - b.position);
+  };
+
+  const getCalibratedLocationForLine = (lineId: LineId, distance: number) => {
+    const points = getCalibratedUPointsForLine(lineId);
+    if (points.length === 0) return null;
+    const clamped = Math.max(0, Math.min(240, distance));
+
+    let best = points[0];
+    for (let index = 0; index < points.length; index += 1) {
+      const prevBoundary = index === 0 ? -Infinity : (points[index - 1].position + points[index].position) / 2;
+      const nextBoundary = index === points.length - 1 ? Infinity : (points[index].position + points[index + 1].position) / 2;
+      if (clamped >= prevBoundary && clamped < nextBoundary) {
+        best = points[index];
+        break;
+      }
+    }
+    return {
+      ...best,
+      distance: clamped,
+      offsetToU: clamped - best.position,
+    };
+  };
+
   const getJointTrackingForLine = (lineId: LineId) => {
     const config = lineConfigs[lineId];
-    const slots = normalizeJointSlots(jointSlotConfigs[lineId]);
-    const totalSlotLength = slots.reduce((sum, slot) => sum + slot.length, 0);
     let accC = 0;
 
     return config.rolls
@@ -3077,32 +3445,16 @@ export default function App() {
         accC += consumed;
         if (!roll.isJoint) return null;
 
-        const exitTime = addMinutes(scheduleTime, accC / config.speed);
-        const startTime = addMinutes(exitTime, -240 / config.speed);
-        const endTime = addMinutes(startTime, totalSlotLength / config.speed);
-        const elapsedMinutes = (currentTime.getTime() - startTime.getTime()) / 60000;
-        const distance = elapsedMinutes * config.speed;
-        const clampedDistance = Math.max(0, Math.min(totalSlotLength, distance));
-
-        let slotStart = 0;
-        let currentSlot = slots[0];
-        for (const slot of slots) {
-          if (clampedDistance <= slotStart + slot.length || slot === slots[slots.length - 1]) {
-            currentSlot = slot;
-            break;
-          }
-          slotStart += slot.length;
-        }
-
-        const inSlotDistance = Math.max(0, clampedDistance - slotStart);
-        const uLength = currentSlot ? currentSlot.length / Math.max(1, currentSlot.uCount) : 1;
-        const currentU = currentSlot
-          ? Math.min(currentSlot.uCount, Math.floor(inSlotDistance / uLength) + 1)
-          : 1;
+        const exitTime = addDistanceWithSpeed(scheduleTime, accC, config, scheduleTime);
+        const startTime = addDistanceWithSpeed(scheduleTime, Math.max(0, accC - 240), config, scheduleTime);
+        const endTime = exitTime;
+        const distance = distanceBetweenWithSpeed(startTime, currentTime, config, scheduleTime);
+        const clampedDistance = Math.max(0, Math.min(240, distance));
+        const calibratedLocation = getCalibratedLocationForLine(lineId, clampedDistance);
         const status =
-          distance < 0
+          currentTime.getTime() < startTime.getTime()
             ? "未进入"
-            : distance > totalSlotLength
+            : distance > 240
               ? "已出线"
               : "追踪中";
 
@@ -3116,11 +3468,11 @@ export default function App() {
           distance,
           clampedDistance,
           status,
-          currentSlot,
-          currentU,
-          inSlotDistance,
-          totalSlotLength,
-          progress: totalSlotLength > 0 ? (clampedDistance / totalSlotLength) * 100 : 0,
+          currentSlot: calibratedLocation?.slot,
+          currentU: calibratedLocation?.uIndex || 1,
+          inSlotDistance: Math.abs(calibratedLocation?.offsetToU || 0),
+          totalSlotLength: 240,
+          progress: (clampedDistance / 240) * 100,
         };
       })
       .filter(Boolean)
@@ -3165,6 +3517,7 @@ export default function App() {
     }));
     setRollCompletionInputs(createLineDateMap(normalizedAccount.lines, ""));
     setRollCompletionTimeInputs(createLineDateMap(normalizedAccount.lines, ""));
+    setJointCalibrationMarks((prev) => mergeJointCalibrationMarks(prev, normalizedAccount.lines));
     setAppUser(normalizedAccount);
     setSelectedLine(normalizedAccount.lines[0].id);
     setActivePage(normalizedAccount.role === "admin" ? "users" : "dashboard");
@@ -3184,6 +3537,7 @@ export default function App() {
       if (updatedUser) {
         setAppUser(updatedUser);
         setLineConfigs((prev) => mergeLineConfigs(prev, updatedUser.lines));
+        setJointCalibrationMarks((prev) => mergeJointCalibrationMarks(prev, updatedUser.lines));
         setSelectedLine((prev) => (
           normalizeLines(updatedUser.lines).some((line) => line.id === prev)
             ? prev
@@ -3193,33 +3547,100 @@ export default function App() {
     }
   };
 
-  const handleExportLocalBackup = () => {
-    const data: Record<string, string> = {};
-    for (let index = 0; index < localStorage.length; index += 1) {
-      const key = localStorage.key(index);
-      if (!key || !isAppLocalDataKey(key)) continue;
-      const value = localStorage.getItem(key);
-      if (value !== null) data[key] = value;
-    }
-
-    const payload = {
-      app: "maizhanpiao-foil-planner",
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      data,
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+  const triggerBackupDownload = (fileName: string, content: string) => {
+    const blob = new Blob([content], {
       type: "application/json",
     });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `maizhanpiao-backup-${format(new Date(), "yyyy-MM-dd-HHmm")}.json`;
+    link.download = fileName;
     document.body.appendChild(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    setLocalBackupMessage("已导出本地备份文件。");
+  };
+
+  const restoreBackupPayload = (payload: any) => {
+    if (payload?.app !== "maizhanpiao-foil-planner") {
+      throw new Error("Invalid backup file");
+    }
+    if (payload?.data && typeof payload.data === "object") {
+      Object.entries(payload.data as Record<string, string>).forEach(([key, value]) => {
+        if (isPortableBackupDataKey(key) && typeof value === "string") {
+          localStorage.setItem(key, value);
+        }
+      });
+    }
+    if (payload?.kind === "full_snapshot" && payload?.snapshot) {
+      const importedAt = payload.exportedAt || new Date().toISOString();
+      const snapshotKey = typeof payload.key === "string" && payload.key.startsWith(`${FULL_SNAPSHOT_PREFIX}:`)
+        ? payload.key
+        : `${FULL_SNAPSHOT_PREFIX}:${payload.snapshot.username || appUser.username}:${format(new Date(importedAt), "yyyy-MM-dd-HHmmss")}`;
+      try {
+        localStorage.setItem(snapshotKey, JSON.stringify(payload, null, 2));
+      } catch {
+        setLocalBackupMessage("备份内容已恢复，但手机本地空间不足，未能把该版本再次存入版本列表。");
+      }
+      if (payload.snapshot.dateKey) {
+        const lineStateKey = getLocalLineStateKey(appUser.username, payload.snapshot.dateKey);
+        writeLocalStorageWithBackup(lineStateKey, JSON.stringify({
+          lineConfigs: payload.snapshot.lineConfigs,
+          activeSplicing: payload.snapshot.activeSplicing,
+          lastWashes: payload.snapshot.lastWashes,
+          jointSlotConfigs: payload.snapshot.jointSlotConfigs,
+          jointCalibrationMarks: payload.snapshot.jointCalibrationMarks,
+          punchRecords: payload.snapshot.punchRecords,
+          savedAt: importedAt,
+        }));
+      }
+    }
+  };
+
+  const handleSaveFullSnapshot = () => {
+    const data: Record<string, string> = {};
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key || !isPortableBackupDataKey(key)) continue;
+      const value = localStorage.getItem(key);
+      if (value !== null) data[key] = value;
+    }
+
+    const exportedAt = new Date().toISOString();
+    const snapshot = {
+      username: appUser.username,
+      dateKey,
+      savedAt: exportedAt,
+      currentTime: currentTime.toISOString(),
+      scheduleTime: scheduleTime.toISOString(),
+      lineConfigs,
+      activeSplicing,
+      lastWashes,
+      jointSlotConfigs,
+      jointCalibrationMarks,
+      punchRecords,
+    };
+
+    const payload = {
+      app: "maizhanpiao-foil-planner",
+      version: 2,
+      kind: "full_snapshot",
+      exportedAt,
+      key: "",
+      snapshot,
+      data,
+    };
+    const snapshotKey = `${FULL_SNAPSHOT_PREFIX}:${appUser.username}:${format(new Date(), "yyyy-MM-dd-HHmmss")}`;
+    payload.key = snapshotKey;
+    const serialized = JSON.stringify(payload, null, 2);
+    const fileName = `maizhanpiao-backup-${format(new Date(), "yyyy-MM-dd-HHmm")}.json`;
+    setBackupExportDialog({ fileName, content: serialized });
+    try {
+      localStorage.setItem(snapshotKey, serialized);
+      setLocalBackupMessage("已生成完整备份，请在弹窗里选择保存方式。");
+    } catch {
+      setLocalBackupMessage("已生成完整备份，但手机本地空间不足，未加入版本列表。请在弹窗里保存到文件或复制文本。");
+    }
   };
 
   const handleImportLocalBackup = (file?: File) => {
@@ -3228,14 +3649,7 @@ export default function App() {
     reader.addEventListener("load", () => {
       try {
         const payload = JSON.parse(String(reader.result || "{}"));
-        if (payload?.app !== "maizhanpiao-foil-planner" || !payload?.data || typeof payload.data !== "object") {
-          throw new Error("Invalid backup file");
-        }
-        Object.entries(payload.data as Record<string, string>).forEach(([key, value]) => {
-          if (isAppLocalDataKey(key) && typeof value === "string") {
-            localStorage.setItem(key, value);
-          }
-        });
+        restoreBackupPayload(payload);
         setLocalBackupMessage("备份已导入，页面正在刷新。");
         window.setTimeout(() => window.location.reload(), 500);
       } catch {
@@ -3245,6 +3659,99 @@ export default function App() {
       }
     });
     reader.readAsText(file);
+  };
+
+  const handleImportBackupText = () => {
+    try {
+      const payload = JSON.parse(backupImportText.trim());
+      restoreBackupPayload(payload);
+      setLocalBackupMessage("备份文本已导入，页面正在刷新。");
+      setShowBackupTextImport(false);
+      setBackupImportText("");
+      window.setTimeout(() => window.location.reload(), 500);
+    } catch {
+      setLocalBackupMessage("导入失败：请粘贴完整的备份 JSON 文本。");
+    }
+  };
+
+  const handleCopyBackupText = async () => {
+    if (!backupExportDialog) return;
+    try {
+      await navigator.clipboard.writeText(backupExportDialog.content);
+      setLocalBackupMessage("备份文本已复制，可以粘贴到备忘录或微信文件助手保存。");
+    } catch {
+      setLocalBackupMessage("复制失败：请长按文本框内容后手动全选复制。");
+    }
+  };
+
+  const handleShareBackup = async () => {
+    if (!backupExportDialog) return;
+    try {
+      const file = new File([backupExportDialog.content], backupExportDialog.fileName, {
+        type: "application/json",
+      });
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({
+          title: "化成箔规划完整备份",
+          text: "保存这份 JSON，之后可在工具里恢复完整规划数据。",
+          files: [file],
+        });
+      } else if (navigator.share) {
+        await navigator.share({
+          title: "化成箔规划完整备份",
+          text: backupExportDialog.content,
+        });
+      } else {
+        await navigator.clipboard.writeText(backupExportDialog.content);
+        setLocalBackupMessage("当前浏览器不支持系统分享，已尝试复制备份文本。");
+      }
+    } catch {
+      setLocalBackupMessage("分享没有完成。可以改用复制备份文本。");
+    }
+  };
+
+  const handleSaveBackupToDevice = async () => {
+    if (!backupExportDialog) return;
+    const picker = (window as Window & {
+      showSaveFilePicker?: (options: {
+        suggestedName?: string;
+        types?: Array<{
+          description: string;
+          accept: Record<string, string[]>;
+        }>;
+      }) => Promise<{
+        createWritable: () => Promise<{
+          write: (data: Blob) => Promise<void>;
+          close: () => Promise<void>;
+        }>;
+      }>;
+    }).showSaveFilePicker;
+
+    if (!picker) {
+      setLocalBackupMessage("当前浏览器不支持直接选择文件夹保存，已打开系统分享，请选择“存储到文件”。");
+      await handleShareBackup();
+      return;
+    }
+
+    try {
+      const fileHandle = await picker({
+        suggestedName: backupExportDialog.fileName,
+        types: [
+          {
+            description: "JSON 备份文件",
+            accept: { "application/json": [".json"] },
+          },
+        ],
+      });
+      const writable = await fileHandle.createWritable();
+      await writable.write(new Blob([backupExportDialog.content], { type: "application/json" }));
+      await writable.close();
+      setLocalBackupMessage("备份文件已保存到你选择的位置。");
+    } catch (error) {
+      if ((error as DOMException)?.name !== "AbortError") {
+        setLocalBackupMessage("没有完成保存。可以改用系统分享或复制文本。");
+      }
+    }
   };
 
   if (!appUser) {
@@ -3352,13 +3859,15 @@ export default function App() {
               <Settings2 size={16} /> 设置
             </button>
             <button
-              onClick={() => { setActivePage("dashboard"); setActiveTab("observe"); setIsMobileMenuOpen(false); }}
-              className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-slate-800 text-slate-300 hover:text-white rounded-lg text-[13px] font-semibold transition-all"
+              onClick={() => { setActivePage("joint_tracking"); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
+                activePage === "joint_tracking"
+                  ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
+                  : "hover:bg-slate-800 text-slate-300 hover:text-white",
+              )}
             >
               <Activity size={16} /> 接头动态追踪
-            </button>
-            <button className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-slate-800 text-slate-300 hover:text-white rounded-lg text-[13px] font-semibold transition-all">
-              <Droplets size={16} /> 结晶冲洗记录
             </button>
           </nav>
         </div>
@@ -3387,11 +3896,11 @@ export default function App() {
           </div>
           <div className="mt-3 grid grid-cols-2 gap-2">
             <button
-              onClick={handleExportLocalBackup}
+              onClick={handleSaveFullSnapshot}
               className="flex items-center justify-center gap-1.5 text-[11px] font-bold text-emerald-200 bg-emerald-900/50 hover:bg-emerald-900 rounded-lg px-2 py-2"
               type="button"
             >
-              <Download size={13} /> 导出
+              <Download size={13} /> 保存完整备份
             </button>
             <button
               onClick={() => localBackupInputRef.current?.click()}
@@ -3399,6 +3908,13 @@ export default function App() {
               type="button"
             >
               <Upload size={13} /> 恢复
+            </button>
+            <button
+              onClick={() => setShowBackupTextImport(true)}
+              className="col-span-2 flex items-center justify-center gap-1.5 text-[11px] font-bold text-amber-100 bg-amber-900/50 hover:bg-amber-900 rounded-lg px-2 py-2"
+              type="button"
+            >
+              <FileText size={13} /> 粘贴备份文本恢复
             </button>
             <input
               ref={localBackupInputRef}
@@ -3534,7 +4050,12 @@ export default function App() {
                           const t = r.endTime;
                           let frontStartTime: Date | undefined;
                           if (r.isJoint) {
-                            frontStartTime = new Date(t.getTime() - (240 / lineConfigs[lineId].speed) * 60000);
+                            frontStartTime = addDistanceWithSpeed(
+                              scheduleTime,
+                              Math.max(0, r.cumulativeCorrosion - 240),
+                              lineConfigs[lineId],
+                              scheduleTime,
+                            );
                           }
 
                           if (t.getTime() >= shiftS.getTime() && t.getTime() <= shiftE.getTime()) {
@@ -3680,49 +4201,101 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Terminal Tabs */}
-                <div className="flex border-b border-slate-800 shrink-0 overflow-x-auto hide-scrollbar">
-                  {(
-                    [
-                      "plan",
-                      "forecast",
-                      "splicing",
-                      "observe",
-                      "wash",
-                      "unroll",
-                    ] as const
-                  ).map((tab) => (
-                    <button
-                      key={tab}
-                      onClick={() => setActiveTab(tab)}
-                      className={cn(
-                        "px-4 py-3 text-xs font-bold uppercase tracking-wider whitespace-nowrap border-b-2 transition-all",
-                        activeTab === tab
-                          ? "text-blue-400 border-blue-500 bg-blue-500/5"
-                          : "text-slate-500 border-transparent hover:text-slate-300",
-                      )}
-                    >
-                      {tab === "plan"
-                        ? "方案规划"
-                        : tab === "forecast"
-                          ? "用料预测"
-                          : tab === "splicing"
-                            ? "接箔/架子作业"
-                            : tab === "observe"
-                              ? "接头动态追踪"
-                              : tab === "wash"
-                                ? "结晶冲洗"
-                                : "卸卷记录"}
-                    </button>
-                  ))}
-                </div>
-
                 {/* Tab Content Area */}
                 <div className="p-6 flex-1 overflow-y-auto bg-slate-900/50 hide-scrollbar">
-                  {/* Tab: Plan */}
-                  {activeTab === "plan" && (
-                    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                      <div className="bg-slate-800/80 p-5 rounded-2xl border border-slate-700">
+	                  {/* Tab: Plan */}
+	                  {activeTab === "plan" && (
+	                    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+	                      <div className="bg-slate-800/80 p-5 rounded-2xl border border-slate-700">
+	                        <div className="mb-4">
+	                          <h4 className="text-sm font-bold text-slate-200">
+		                            过架子提醒
+		                          </h4>
+		                          <p className="text-[10px] text-slate-400 mt-1">
+		                            接箔前端处理完成后，点击按钮直接启动 15 分钟过架子倒计时。
+		                          </p>
+	                        </div>
+
+	                        {(() => {
+	                          const task = updatedSplicingTasks
+	                            .filter((item) => item.line === selectedLine && item.status !== "done")
+	                            .sort((a, b) => b.startTime.getTime() - a.startTime.getTime())[0];
+	                          if (!task) return null;
+
+	                          return (
+	                            <div className="mb-4 rounded-xl bg-slate-950/60 border border-orange-500/30 p-3">
+		                              <div className="flex items-center justify-between gap-3 mb-2">
+		                                <div>
+		                                  <div className="text-[10px] font-black text-slate-500">
+		                                    {selectedLine}# 线过架子提醒
+		                                  </div>
+	                                  <div className={cn(
+	                                    "text-sm font-black mt-0.5",
+	                                    task.urgency === "critical"
+	                                      ? "text-red-300"
+	                                      : task.urgency === "warning"
+	                                        ? "text-orange-300"
+	                                        : "text-blue-200",
+	                                  )}>
+	                                    {task.displayStatus}
+	                                  </div>
+	                                </div>
+		                                <div className="text-right font-mono">
+		                                  <div className="text-lg font-black text-white">
+		                                    {task.rackTimerDueAt && !task.rackAlarmAcknowledged
+		                                      ? `${Math.max(0, task.rackRemainingMinutes ?? 0)}m`
+		                                      : `${Math.max(0, task.minElapsed)}m`}
+		                                  </div>
+		                                  <div className="text-[10px] font-bold text-slate-500">
+		                                    {task.rackTimerDueAt && !task.rackAlarmAcknowledged ? "剩余" : "已过"}
+		                                  </div>
+	                                </div>
+	                              </div>
+	                              <div className="h-2 rounded-full bg-slate-800 overflow-hidden border border-slate-700">
+	                                <div
+	                                  className={cn(
+	                                    "h-full transition-all",
+	                                    task.urgency === "critical"
+	                                      ? "bg-red-500"
+	                                      : task.urgency === "warning"
+	                                        ? "bg-orange-500"
+	                                        : "bg-blue-500",
+	                                  )}
+	                                  style={{ width: `${Math.max(0, Math.min(100, task.progress))}%` }}
+	                                />
+	                              </div>
+	                              {task.status === "splicing" && task.minElapsed >= 30 && (
+	                                <button
+	                                  type="button"
+	                                  onClick={() => handleStartRackCountdown(task.id)}
+	                                  className="mt-3 w-full rounded-lg bg-orange-600 hover:bg-orange-500 px-3 py-2 text-xs font-black text-white"
+	                                >
+	                                  已接好，开始过架子15分钟倒计时
+	                                </button>
+	                              )}
+	                              {task.rackTimerDueAt && !task.rackAlarmAcknowledged && (
+	                                <button
+	                                  type="button"
+	                                  onClick={() => handleAcknowledgeRackAlarm(task.id)}
+	                                  className="mt-3 w-full rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3 py-2 text-xs font-black text-white"
+	                                >
+	                                  已准备好，取消提醒
+	                                </button>
+	                              )}
+	                            </div>
+	                          );
+	                        })()}
+
+	                        <button
+	                          onClick={() => handleConfirmJointPrepComplete(selectedLine, `manual-rack-${Date.now()}`)}
+	                          className="w-full py-4 bg-orange-600 hover:bg-orange-500 text-white font-black text-sm rounded-xl transition-all shadow-[0_0_15px_rgba(234,88,12,0.3)] active:scale-95 flex items-center justify-center gap-2"
+	                        >
+	                          <Scissors size={18} />
+	                          已处理好，开始过架子15分钟倒计时
+	                        </button>
+	                      </div>
+
+	                      <div className="bg-slate-800/80 p-5 rounded-2xl border border-slate-700">
                         <div className="mb-4">
                           <h4 className="text-sm font-bold text-slate-200 flex items-center gap-2">
                             <Settings2 size={16} />
@@ -4114,24 +4687,128 @@ export default function App() {
                           </div>
 
                           <div className="col-span-2 pt-2 border-t border-slate-700/50 mt-2">
-                            <label className="text-[10px] font-bold text-slate-400 uppercase">
-                              当前车速(m/min)
-                            </label>
-                            <input
-                              type="number"
-                              step="0.01"
-                              value={lineConfigs[selectedLine].speed || ""}
-                              onChange={(e) =>
-                                setLineConfigs((p) => ({
-                                  ...p,
-                                  [selectedLine]: {
-                                    ...p[selectedLine],
-                                    speed: Number(e.target.value),
-                                  },
-                                }))
-                              }
-                              className="w-1/2 bg-slate-900 border border-slate-700/60 rounded-lg px-3 py-2 text-xs text-white font-mono mt-1"
-                            />
+                            <div className="flex items-center justify-between gap-3">
+                              <label className="text-[10px] font-bold text-slate-400 uppercase">
+                                车速设置(m/min)
+                              </label>
+                              <span className="text-[10px] font-black text-blue-300">
+                                当前生效 {getSpeedAtTime(lineConfigs[selectedLine], currentTime, scheduleTime).toFixed(2)}
+                              </span>
+                            </div>
+                            <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] gap-2 items-center">
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={lineConfigs[selectedLine].speed || ""}
+                                onChange={(e) =>
+                                  setLineConfigs((p) => ({
+                                    ...p,
+                                    [selectedLine]: {
+                                      ...p[selectedLine],
+                                      speed: Number(e.target.value),
+                                    },
+                                  }))
+                                }
+                                className="min-w-0 bg-slate-900 border border-slate-700/60 rounded-lg px-3 py-2 text-xs text-white font-mono"
+                              />
+                              <span className="text-[10px] font-bold text-slate-500">班次开始默认</span>
+                            </div>
+                            <div className="mt-2 space-y-2">
+                              {(lineConfigs[selectedLine].speedSegments || [])
+                                .slice()
+                                .sort((a, b) => a.startTime.localeCompare(b.startTime))
+                                .map((segment, index, sortedSegments) => (
+                                  <div
+                                    key={segment.id}
+                                    className="grid grid-cols-[96px_minmax(0,1fr)_32px] gap-2 items-center rounded-lg border border-slate-700/50 bg-slate-900/60 p-2"
+                                  >
+                                    <input
+                                      type="time"
+                                      value={segment.startTime}
+                                      onChange={(e) =>
+                                        setLineConfigs((p) => ({
+                                          ...p,
+                                          [selectedLine]: {
+                                            ...p[selectedLine],
+                                            speedSegments: (p[selectedLine].speedSegments || []).map((item) =>
+                                              item.id === segment.id
+                                                ? { ...item, startTime: e.target.value }
+                                                : item,
+                                            ),
+                                          },
+                                        }))
+                                      }
+                                      className="min-w-0 bg-slate-950 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white font-mono"
+                                    />
+                                    <div className="min-w-0 flex items-center gap-2">
+                                      <input
+                                        type="number"
+                                        step="0.01"
+                                        value={segment.speed || ""}
+                                        onChange={(e) =>
+                                          setLineConfigs((p) => ({
+                                            ...p,
+                                            [selectedLine]: {
+                                              ...p[selectedLine],
+                                              speedSegments: (p[selectedLine].speedSegments || []).map((item) =>
+                                                item.id === segment.id
+                                                  ? { ...item, speed: Number(e.target.value) }
+                                                  : item,
+                                              ),
+                                            },
+                                          }))
+                                        }
+                                        className="min-w-0 flex-1 bg-slate-950 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white font-mono"
+                                      />
+                                      <span className="hidden sm:inline text-[10px] font-bold text-slate-500 whitespace-nowrap">
+                                        至 {sortedSegments[index + 1]?.startTime || "后续"}
+                                      </span>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setLineConfigs((p) => ({
+                                          ...p,
+                                          [selectedLine]: {
+                                            ...p[selectedLine],
+                                            speedSegments: (p[selectedLine].speedSegments || []).filter(
+                                              (item) => item.id !== segment.id,
+                                            ),
+                                          },
+                                        }))
+                                      }
+                                      className="h-9 w-8 rounded-lg border border-red-500/30 bg-red-500/10 text-red-300 flex items-center justify-center"
+                                    >
+                                      <Trash2 size={14} />
+                                    </button>
+                                  </div>
+                                ))}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setLineConfigs((p) => ({
+                                    ...p,
+                                    [selectedLine]: {
+                                      ...p[selectedLine],
+                                      speedSegments: [
+                                        ...(p[selectedLine].speedSegments || []),
+                                        {
+                                          id: Math.random().toString(),
+                                          startTime: format(currentTime, "HH:mm"),
+                                          speed: getSpeedAtTime(p[selectedLine], currentTime, scheduleTime),
+                                        },
+                                      ],
+                                    },
+                                  }))
+                                }
+                                className="w-full rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-[11px] font-black text-blue-300 hover:bg-blue-500/20"
+                              >
+                                + 添加变速时间段
+                              </button>
+                              <p className="text-[10px] leading-relaxed text-slate-500">
+                                例如 10:00 填 1.10，表示从 10:00 起按 1.10 计算，直到下一条变速记录。
+                              </p>
+                            </div>
                           </div>
                         </div>
 
@@ -4139,18 +4816,24 @@ export default function App() {
                           <button
                             onClick={() => {
                               handleGlobalGeneratePlan();
+                              setPlanSuccess(true);
+                              setTimeout(() => setPlanSuccess(false), 2500);
                               handleSavePlan();
                             }}
                             className={cn(
                               "flex-1 py-3 text-white font-black text-[13px] rounded-xl transition-all shadow-lg flex justify-center items-center gap-2",
-                              saveSuccess
-                                ? "bg-emerald-500"
+                              saveSuccess || planSuccess
+                                ? "bg-emerald-500 shadow-emerald-900/30"
                                 : "bg-indigo-600 hover:bg-indigo-500 active:scale-95"
                             )}
                           >
                             {saveSuccess ? (
                               <>
                                 <CheckSquare size={16} /> 已保存排产
+                              </>
+                            ) : planSuccess ? (
+                              <>
+                                <CheckSquare size={16} /> 已排产
                               </>
                             ) : (
                               <>
@@ -4333,8 +5016,7 @@ export default function App() {
                                         消耗: {r.corrosionConsumed}m<br />
                                         耗时:{" "}
                                         {Math.round(
-                                          r.corrosionConsumed /
-                                            lineConfigs[selectedLine].speed,
+                                          Math.max(0, differenceInMinutes(r.endTime, r.startTime)),
                                         )}
                                         min
                                       </div>
@@ -4370,42 +5052,24 @@ export default function App() {
                             const lineId = selectedLine;
                             const conf = lineConfigs[lineId];
                             const currentRem = getCurrentCorrosionRemaining(conf);
-                            let accMins = currentRem / conf.speed;
                             const machineLen = 240;
+                            let accDistance = currentRem;
 
                             // Current Roll
-                            const currentRunOutDate = addMinutes(
-                              currentTime,
-                              accMins,
-                            );
-                            const currentEmergeDate = addMinutes(
-                              currentTime,
-                              accMins + machineLen / conf.speed,
-                            );
+                            const currentRunOutDate = addDistanceWithSpeed(currentTime, accDistance, conf, scheduleTime);
+                            const currentEmergeDate = addDistanceWithSpeed(currentTime, accDistance + machineLen, conf, scheduleTime);
 
                             const nextRollsList = [];
 
                             const futureRolls = conf.futureRolls || [];
                             for (let i = 0; i < futureRolls.length; i++) {
                               const fr = futureRolls[i];
-                              const startInTime = addMinutes(
-                                currentTime,
-                                accMins,
-                              );
-                              const startOutTime = addMinutes(
-                                currentTime,
-                                accMins + machineLen / conf.speed,
-                              );
+                              const startInTime = addDistanceWithSpeed(currentTime, accDistance, conf, scheduleTime);
+                              const startOutTime = addDistanceWithSpeed(currentTime, accDistance + machineLen, conf, scheduleTime);
 
-                              const rOutMins = accMins + fr.length / conf.speed;
-                              const endInTime = addMinutes(
-                                currentTime,
-                                rOutMins,
-                              );
-                              const endOutTime = addMinutes(
-                                currentTime,
-                                rOutMins + machineLen / conf.speed,
-                              );
+                              accDistance += fr.length;
+                              const endInTime = addDistanceWithSpeed(currentTime, accDistance, conf, scheduleTime);
+                              const endOutTime = addDistanceWithSpeed(currentTime, accDistance + machineLen, conf, scheduleTime);
 
                               nextRollsList.push({
                                 ...fr,
@@ -4414,7 +5078,6 @@ export default function App() {
                                 endInTime,
                                 endOutTime,
                               });
-                              accMins = rOutMins;
                             }
 
                             const fb = forecastBatches[lineId] || "";
@@ -4571,21 +5234,21 @@ export default function App() {
                     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
                       <div className="bg-slate-800/80 p-5 rounded-2xl border border-slate-700">
                         <div className="mb-4">
-                          <h4 className="text-sm font-bold text-slate-200">
-                            开始接箔作业流向
-                          </h4>
-                          <p className="text-[10px] text-slate-400 mt-1">
-                            耗时30分钟，完成后将启动过架子的延时提醒。
-                          </p>
+	                          <h4 className="text-sm font-bold text-slate-200">
+	                            过架子提醒
+	                          </h4>
+	                          <p className="text-[10px] text-slate-400 mt-1">
+	                            接箔前端处理完成后，点击按钮直接启动 15 分钟过架子倒计时。
+	                          </p>
                         </div>
 
-                        <button
-                          onClick={handleStartSplicing}
-                          className="w-full py-4 bg-orange-600 hover:bg-orange-500 text-white font-black text-sm rounded-xl transition-all shadow-[0_0_15px_rgba(234,88,12,0.3)] active:scale-95 flex items-center justify-center gap-2"
-                        >
-                          <Scissors size={18} />
-                          确认在 {selectedLine}# 线开始接箔
-                        </button>
+	                        <button
+	                          onClick={() => handleConfirmJointPrepComplete(selectedLine, `manual-rack-${Date.now()}`)}
+	                          className="w-full py-4 bg-orange-600 hover:bg-orange-500 text-white font-black text-sm rounded-xl transition-all shadow-[0_0_15px_rgba(234,88,12,0.3)] active:scale-95 flex items-center justify-center gap-2"
+	                        >
+	                          <Scissors size={18} />
+	                          已处理好，开始过架子15分钟倒计时
+	                        </button>
                       </div>
 
                       <div className="text-xs text-slate-500 p-4 border border-dashed border-slate-700 rounded-xl bg-slate-900/30">
@@ -4603,179 +5266,6 @@ export default function App() {
                           <li>不可在吃饭时间 (11:35等) 进行。</li>
                           <li>接箔后 15-20分钟需 "过架子" (耗时10m)。</li>
                         </ul>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Tab: Wash */}
-                  {activeTab === "wash" && (
-                    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                      <div className="bg-slate-800/80 p-5 rounded-2xl border border-slate-700">
-                        <div className="mb-6">
-                          <h4 className="text-sm font-bold text-slate-200">
-                            登记结晶冲洗
-                          </h4>
-                          <p className="text-[10px] text-slate-400 mt-1">
-                            冲洗耗时5-20分钟。记录后系统将重置该线的冲洗倒计时。
-                          </p>
-                        </div>
-                        <button
-                          onClick={handleRecordWash}
-                          className="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white font-black text-sm rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] active:scale-95 flex items-center justify-center gap-2"
-                        >
-                          <Droplets size={18} />
-                          记录 {selectedLine}# 线完成冲洗 (当前时间)
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Tab: Joint tracking */}
-                  {activeTab === "observe" && (
-                    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                      <div className="bg-slate-800/80 p-5 rounded-2xl border border-slate-700">
-                        <div className="mb-6">
-                          <h4 className="text-sm font-bold text-slate-200">
-                            接头动态追踪
-                          </h4>
-                          <p className="text-[10px] text-slate-400 mt-1">
-                            依据当前车速和 240 米线体长度，推算接头每一分钟所在的槽和 U。
-                          </p>
-                        </div>
-
-                        <div className="space-y-3">
-                          {(() => {
-                            const joints = getJointTrackingForLine(selectedLine);
-                            if (joints.length === 0) {
-                              return (
-                                <div className="rounded-xl border border-dashed border-slate-700 bg-slate-900/40 p-5 text-center text-xs font-bold text-slate-500">
-                                  当前规划里还没有接头任务。排产后，末端接头会自动出现在这里。
-                                </div>
-                              );
-                            }
-
-                            return joints.slice(0, 4).map((joint) => (
-                              <div key={joint.id} className="rounded-2xl border border-slate-700 bg-slate-900/50 p-4">
-                                <div className="flex items-start justify-between gap-3">
-                                  <div>
-                                    <div className="text-[10px] font-black text-slate-500">接头任务 · {joint.lineId}#线</div>
-                                    <div className="mt-1 text-lg font-black text-white">
-                                      {joint.status === "追踪中"
-                                        ? `${joint.currentSlot?.name || "未知槽"} · U${joint.currentU}`
-                                        : joint.status}
-                                    </div>
-                                    <div className="mt-1 text-[11px] font-bold text-slate-400">
-                                      进入 {format(joint.startTime, "HH:mm")} · 出线 {format(joint.exitTime, "HH:mm")}
-                                    </div>
-                                  </div>
-                                  <div className={cn(
-                                    "rounded-xl px-3 py-2 text-right font-mono",
-                                    joint.status === "追踪中" ? "bg-emerald-500/10 text-emerald-300" : "bg-slate-800 text-slate-400",
-                                  )}>
-                                    <div className="text-xl font-black">{joint.clampedDistance.toFixed(1)}m</div>
-                                    <div className="text-[10px] font-bold">/ {joint.totalSlotLength.toFixed(0)}m</div>
-                                  </div>
-                                </div>
-
-                                <div className="mt-4 h-3 rounded-full bg-slate-800 overflow-hidden border border-slate-700">
-                                  <div
-                                    className="h-full bg-gradient-to-r from-orange-500 to-emerald-400"
-                                    style={{ width: `${Math.max(0, Math.min(100, joint.progress))}%` }}
-                                  />
-                                </div>
-
-                                <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] font-bold text-slate-400">
-                                  <div className="rounded-lg bg-slate-950/50 border border-slate-800 p-2">
-                                    当前槽内位置：{joint.inSlotDistance.toFixed(1)}m
-                                  </div>
-                                  <div className="rounded-lg bg-slate-950/50 border border-slate-800 p-2">
-                                    当前车速：{lineConfigs[selectedLine].speed} m/min
-                                  </div>
-                                </div>
-                              </div>
-                            ));
-                          })()}
-                        </div>
-                      </div>
-
-                      <div className="bg-slate-800/80 p-5 rounded-2xl border border-slate-700">
-                        <div className="flex items-center justify-between gap-3 mb-4">
-                          <div>
-                            <h4 className="text-sm font-bold text-slate-200">
-                              槽名称和 U 数管理
-                            </h4>
-                            <p className="text-[10px] text-slate-400 mt-1">
-                              槽长总和建议保持 240 米。U 数用于计算接头处于第几个 U。
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => resetJointSlots(selectedLine)}
-                            className="shrink-0 rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-[10px] font-black text-slate-300 hover:bg-slate-700"
-                          >
-                            恢复默认
-                          </button>
-                        </div>
-
-                        <div className="space-y-2">
-                          {(jointSlotConfigs[selectedLine] || []).map((slot, index) => (
-                            <div key={slot.id} className="grid grid-cols-[auto_minmax(0,1fr)_72px_58px_auto] gap-2 items-end rounded-xl bg-slate-900/50 border border-slate-700/60 p-2">
-                              <div className="pb-2 text-xs font-black text-slate-500">#{index + 1}</div>
-                              <label>
-                                <span className="block text-[9px] text-slate-500 font-bold mb-1">槽名</span>
-                                <input
-                                  value={slot.name}
-                                  onChange={(e) => updateJointSlot(selectedLine, slot.id, { name: e.target.value })}
-                                  className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 font-bold outline-none focus:border-blue-400"
-                                />
-                              </label>
-                              <label>
-                                <span className="block text-[9px] text-slate-500 font-bold mb-1">米</span>
-                                <input
-                                  type="number"
-                                  value={slot.length}
-                                  onChange={(e) => updateJointSlot(selectedLine, slot.id, { length: Number(e.target.value) })}
-                                  className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 font-mono outline-none focus:border-blue-400"
-                                />
-                              </label>
-                              <label>
-                                <span className="block text-[9px] text-slate-500 font-bold mb-1">U</span>
-                                <input
-                                  type="number"
-                                  value={slot.uCount}
-                                  onChange={(e) => updateJointSlot(selectedLine, slot.id, { uCount: Number(e.target.value) })}
-                                  className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 font-mono outline-none focus:border-blue-400"
-                                />
-                              </label>
-                              <button
-                                type="button"
-                                onClick={() => removeJointSlot(selectedLine, slot.id)}
-                                className="mb-0.5 rounded-lg bg-red-950/40 border border-red-500/30 p-2 text-red-300 hover:bg-red-600/80 hover:text-white"
-                              >
-                                <Trash2 size={13} />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-
-                        <div className="mt-3 flex items-center justify-between gap-3">
-                          <div className={cn(
-                            "text-xs font-black",
-                            Math.abs((jointSlotConfigs[selectedLine] || []).reduce((sum, slot) => sum + Number(slot.length || 0), 0) - 240) <= 0.1
-                              ? "text-emerald-400"
-                              : "text-amber-400",
-                          )}>
-                            总长 {(jointSlotConfigs[selectedLine] || []).reduce((sum, slot) => sum + Number(slot.length || 0), 0).toFixed(1)}m / 240m
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => addJointSlot(selectedLine)}
-                            className="rounded-lg bg-blue-600 hover:bg-blue-500 px-3 py-2 text-xs font-black text-white flex items-center gap-1.5"
-                          >
-                            <Plus size={14} />
-                            加槽
-                          </button>
-                        </div>
                       </div>
                     </div>
                   )}
@@ -4821,6 +5311,269 @@ export default function App() {
 
             </div>
           </div>
+        ) : activePage === "joint_tracking" ? (
+          <div className="bg-slate-950 text-slate-100 flex-1 overflow-auto p-4 sm:p-6 sm:rounded-3xl shadow-sm border border-slate-800">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5">
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setActivePage("dashboard")}
+                  className="lg:hidden p-2 -ml-2 text-slate-300 hover:bg-slate-800 rounded-lg transition-colors shrink-0 flex items-center gap-1"
+                >
+                  <ChevronLeft size={24} />
+                  <span className="font-bold text-sm">主页</span>
+                </button>
+                <div className="w-10 h-10 rounded-xl bg-orange-500/15 text-orange-300 border border-orange-500/25 flex items-center justify-center">
+                  <Activity size={20} />
+                </div>
+                <div>
+                  <h2 className="text-xl sm:text-2xl font-black">接头动态追踪</h2>
+                  <p className="text-xs sm:text-sm font-bold text-slate-400 mt-1">
+                    通过手动标记接头到达的槽/U，反推真实位置，再预测未来每分钟位置。
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {activeLines.map((line) => (
+                  <button
+                    key={line}
+                    onClick={() => setSelectedLine(line)}
+                    className={cn(
+                      "px-3 py-2 rounded-xl text-xs font-black border",
+                      selectedLine === line
+                        ? "bg-blue-600 text-white border-blue-400"
+                        : "bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800",
+                    )}
+                    type="button"
+                  >
+                    {line}# 线
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {(() => {
+              const joints = getJointTrackingForLine(selectedLine);
+              const activeJoint = joints.find((joint) => joint.status === "追踪中") || joints[0];
+              const calibratedPoints = getCalibratedUPointsForLine(selectedLine);
+              const measuredCount = calibratedPoints.filter((point) => point.calibrated).length;
+
+              return (
+                <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)] gap-5">
+                  <div className="space-y-5">
+                    <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:p-5">
+                      <div className="flex items-start justify-between gap-3 mb-4">
+                        <div>
+                          <h3 className="text-sm font-black text-slate-100">当前接头</h3>
+                          <p className="text-[11px] font-bold text-slate-500 mt-1">
+                            标记按钮会使用当前接头位置作为该 U 的真实米数。
+                          </p>
+                        </div>
+                        <div className="rounded-xl bg-slate-950 border border-slate-800 px-3 py-2 text-right">
+                          <div className="text-[10px] font-black text-slate-500">标定点</div>
+                          <div className="text-xl font-black text-emerald-300">{measuredCount}</div>
+                        </div>
+                      </div>
+
+                      {!activeJoint ? (
+                        <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/60 p-6 text-center text-xs font-bold text-slate-500">
+                          当前规划里还没有接头任务。生成分卷计划后，末端接头会出现在这里。
+                        </div>
+                      ) : (
+                        <div className="rounded-2xl border border-slate-700 bg-slate-950/60 p-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <div className="text-[10px] font-black text-slate-500">
+                                接头任务 · {activeJoint.lineId}#线
+                              </div>
+                              <div className="mt-1 text-2xl font-black text-white">
+                                {activeJoint.status === "追踪中"
+                                  ? `${activeJoint.currentSlot?.name || "未知槽"} · U${activeJoint.currentU}`
+                                  : activeJoint.status}
+                              </div>
+                              <div className="mt-1 text-[11px] font-bold text-slate-400">
+                                进入 {format(activeJoint.startTime, "HH:mm")} · 出线 {format(activeJoint.exitTime, "HH:mm")} · 当前车速 {getSpeedAtTime(lineConfigs[selectedLine], currentTime, scheduleTime).toFixed(2)} m/min
+                              </div>
+                            </div>
+                            <div className="rounded-xl bg-emerald-500/10 text-emerald-300 px-3 py-2 text-right font-mono">
+                              <div className="text-2xl font-black">{activeJoint.clampedDistance.toFixed(1)}m</div>
+                              <div className="text-[10px] font-bold">/ 240m</div>
+                            </div>
+                          </div>
+                          <div className="mt-4 h-3 rounded-full bg-slate-800 overflow-hidden border border-slate-700">
+                            <div
+                              className="h-full bg-gradient-to-r from-orange-500 to-emerald-400"
+                              style={{ width: `${Math.max(0, Math.min(100, activeJoint.progress))}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </section>
+
+                    <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:p-5">
+                      <div className="flex items-center justify-between gap-3 mb-4">
+                        <div>
+                          <h3 className="text-sm font-black text-slate-100">槽和 U 标定</h3>
+                          <p className="text-[11px] font-bold text-slate-500 mt-1">
+                            接头实际走到某个 U 时，点“标记到达”，系统会记录该 U 的真实位置。
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setJointCalibrationMarks((prev) => ({ ...prev, [selectedLine]: [] }))}
+                          className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-[10px] font-black text-slate-300 hover:bg-slate-800"
+                        >
+                          清空标定
+                        </button>
+                      </div>
+
+                      <div className="space-y-3">
+                        {normalizeJointSlots(jointSlotConfigs[selectedLine]).map((slot) => (
+                          <div key={slot.id} className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                            <div className="flex items-center justify-between gap-3 mb-3">
+                              <div className="font-black text-sm text-slate-200">{slot.name}</div>
+                              <div className="text-[10px] font-bold text-slate-500">{slot.uCount} 个 U</div>
+                            </div>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                              {Array.from({ length: slot.uCount }, (_, idx) => {
+                                const uIndex = idx + 1;
+                                const point = calibratedPoints.find((item) => item.slot.id === slot.id && item.uIndex === uIndex);
+                                return (
+                                  <div key={`${slot.id}-${uIndex}`} className="rounded-lg bg-slate-900 border border-slate-800 p-2">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="text-xs font-black text-slate-200">U{uIndex}</span>
+                                      <span className={cn("text-[10px] font-mono font-black", point?.calibrated ? "text-emerald-300" : "text-slate-500")}>
+                                        {point ? point.position.toFixed(1) : "--"}m
+                                      </span>
+                                    </div>
+                                    <div className="mt-2 grid grid-cols-2 gap-1">
+                                      <button
+                                        type="button"
+                                        disabled={!activeJoint || activeJoint.status !== "追踪中"}
+                                        onClick={() => activeJoint && markJointUPosition(selectedLine, activeJoint.id, slot.id, uIndex)}
+                                        className="rounded bg-orange-600 disabled:opacity-40 disabled:bg-slate-700 px-2 py-1.5 text-[10px] font-black text-white"
+                                      >
+                                        标记到达
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => clearJointUPosition(selectedLine, slot.id, uIndex)}
+                                        className="rounded bg-slate-800 px-2 py-1.5 text-[10px] font-black text-slate-300"
+                                      >
+                                        清除
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  </div>
+
+                  <div className="space-y-5">
+                    <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:p-5">
+                      <h3 className="text-sm font-black text-slate-100 mb-3">未来每分钟位置</h3>
+                      {!activeJoint ? (
+                        <div className="rounded-xl border border-dashed border-slate-700 p-5 text-center text-xs font-bold text-slate-500">
+                          暂无可预测接头。
+                        </div>
+                      ) : (
+                        <div className="space-y-2 max-h-[420px] overflow-auto pr-1">
+                          {Array.from({ length: 31 }, (_, minute) => {
+                            const futureTime = addMinutes(currentTime, minute);
+                            const distance =
+                              activeJoint.clampedDistance +
+                              distanceBetweenWithSpeed(currentTime, futureTime, lineConfigs[selectedLine], scheduleTime);
+                            const location = getCalibratedLocationForLine(selectedLine, distance);
+                            const isOut = distance > 240;
+                            return (
+                              <div key={minute} className="grid grid-cols-[56px_minmax(0,1fr)_64px] gap-2 items-center rounded-lg bg-slate-950/60 border border-slate-800 px-3 py-2">
+                                <div className="font-mono text-xs font-black text-blue-300">
+                                  {format(futureTime, "HH:mm")}
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="truncate text-xs font-black text-slate-200">
+                                    {isOut ? "已出生产线" : `${location?.slot.name || "未知槽"} · U${location?.uIndex || "-"}`}
+                                  </div>
+                                  <div className="text-[10px] font-bold text-slate-500">
+                                    {minute === 0 ? "当前" : `${minute} 分钟后`}
+                                  </div>
+                                </div>
+                                <div className="text-right font-mono text-xs font-black text-slate-400">
+                                  {Math.min(240, distance).toFixed(1)}m
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </section>
+
+                    <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:p-5">
+                      <div className="flex items-center justify-between gap-3 mb-4">
+                        <div>
+                          <h3 className="text-sm font-black text-slate-100">槽名称和 U 数管理</h3>
+                          <p className="text-[11px] font-bold text-slate-500 mt-1">
+                            这里管理结构；真实米数由上面的打点自动反推。
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => resetJointSlots(selectedLine)}
+                          className="shrink-0 rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-[10px] font-black text-slate-300 hover:bg-slate-800"
+                        >
+                          恢复默认
+                        </button>
+                      </div>
+
+                      <div className="space-y-2">
+                        {(jointSlotConfigs[selectedLine] || []).map((slot, index) => (
+                          <div key={slot.id} className="grid grid-cols-[auto_minmax(0,1fr)_58px_auto] gap-2 items-end rounded-xl bg-slate-950/60 border border-slate-800 p-2">
+                            <div className="pb-2 text-xs font-black text-slate-500">#{index + 1}</div>
+                            <label>
+                              <span className="block text-[9px] text-slate-500 font-bold mb-1">槽名</span>
+                              <input
+                                value={slot.name}
+                                onChange={(e) => updateJointSlot(selectedLine, slot.id, { name: e.target.value })}
+                                className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 font-bold outline-none focus:border-blue-400"
+                              />
+                            </label>
+                            <label>
+                              <span className="block text-[9px] text-slate-500 font-bold mb-1">U</span>
+                              <input
+                                type="number"
+                                value={slot.uCount}
+                                onChange={(e) => updateJointSlot(selectedLine, slot.id, { uCount: Number(e.target.value) })}
+                                className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 font-mono outline-none focus:border-blue-400"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => removeJointSlot(selectedLine, slot.id)}
+                              className="mb-0.5 rounded-lg bg-red-950/40 border border-red-500/30 p-2 text-red-300 hover:bg-red-600/80 hover:text-white"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => addJointSlot(selectedLine)}
+                        className="mt-3 w-full rounded-lg bg-blue-600 hover:bg-blue-500 px-3 py-2 text-xs font-black text-white flex items-center justify-center gap-1.5"
+                      >
+                        <Plus size={14} />
+                        加槽
+                      </button>
+                    </section>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
         ) : activePage === "admin" ? (
           <div className="bg-slate-50 flex-1 overflow-auto p-4 sm:p-6 sm:rounded-3xl shadow-sm border border-slate-200">
             <div className="flex items-center justify-between mb-4">
@@ -4833,11 +5586,22 @@ export default function App() {
               </button>
             </div>
             <AdminDashboard
-              onLoadSnapshot={(configs, splicing, washes, jointSlots) => {
-                if (configs) setLineConfigs(configs);
-                if (splicing) setActiveSplicing(splicing);
-                if (washes) setLastWashes(washes);
-                if (jointSlots) setJointSlotConfigs(mergeJointSlotConfigs(jointSlots, lineAssignments));
+              onSaveFullSnapshot={handleSaveFullSnapshot}
+              onLoadSnapshot={(configs, splicing, washes, jointSlots, restoredPunchRecords, restoredJointCalibrationMarks) => {
+                const restored = reviveLineStatePayload({
+                  lineConfigs: configs,
+                  activeSplicing: splicing,
+                  lastWashes: washes,
+                  jointSlotConfigs: jointSlots,
+                  jointCalibrationMarks: restoredJointCalibrationMarks,
+                  punchRecords: restoredPunchRecords,
+                }, lineAssignments);
+                setLineConfigs(restored.lineConfigs);
+                setActiveSplicing(restored.activeSplicing);
+                setLastWashes(restored.lastWashes);
+                setJointSlotConfigs(restored.jointSlotConfigs);
+                setJointCalibrationMarks(restored.jointCalibrationMarks);
+                setPunchRecords(restored.punchRecords);
                 setIsPlanningMode(true);
                 setActivePage("plan");
               }}
@@ -4922,6 +5686,121 @@ export default function App() {
           />
         ) : null}
       </main>
+
+      {/* Backup Export Dialog */}
+      {backupExportDialog && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-xl max-w-2xl w-full mx-auto max-h-[88vh] overflow-hidden flex flex-col">
+            <div className="flex items-start justify-between gap-4 mb-3">
+              <div>
+                <h3 className="text-lg font-black text-slate-900">完整备份已生成</h3>
+                <p className="text-xs font-bold text-slate-500 mt-1 leading-relaxed">
+                  优先点“选择位置保存”。iPhone 会通过系统分享选择“存储到文件”；如果浏览器仍然限制保存，请复制文本到备忘录或微信文件助手。
+                </p>
+              </div>
+              <button
+                onClick={() => setBackupExportDialog(null)}
+                className="p-2 rounded-lg text-slate-500 hover:bg-slate-100"
+                type="button"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="text-xs font-mono text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 mb-3 break-all">
+              {backupExportDialog.fileName}
+            </div>
+            <textarea
+              readOnly
+              value={backupExportDialog.content}
+              className="min-h-[220px] flex-1 w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-3 font-mono text-[11px] leading-relaxed text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-400"
+              onFocus={(event) => event.currentTarget.select()}
+            />
+            <div className="mt-4 grid grid-cols-2 sm:grid-cols-5 gap-2">
+              <button
+                onClick={handleSaveBackupToDevice}
+                className="flex items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-2 text-xs font-black text-white hover:bg-emerald-700"
+                type="button"
+              >
+                <Download size={14} /> 选择位置保存
+              </button>
+              <button
+                onClick={handleCopyBackupText}
+                className="flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 px-3 py-2 text-xs font-black text-white hover:bg-blue-700"
+                type="button"
+              >
+                <Copy size={14} /> 复制文本
+              </button>
+              <button
+                onClick={handleShareBackup}
+                className="flex items-center justify-center gap-1.5 rounded-xl bg-teal-600 px-3 py-2 text-xs font-black text-white hover:bg-teal-700"
+                type="button"
+              >
+                <Share2 size={14} /> 系统分享
+              </button>
+              <button
+                onClick={() => triggerBackupDownload(backupExportDialog.fileName, backupExportDialog.content)}
+                className="flex items-center justify-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-black text-white hover:bg-slate-800"
+                type="button"
+              >
+                <Download size={14} /> 普通下载
+              </button>
+              <button
+                onClick={() => setBackupExportDialog(null)}
+                className="flex items-center justify-center rounded-xl bg-slate-100 px-3 py-2 text-xs font-black text-slate-700 hover:bg-slate-200"
+                type="button"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Backup Text Import Dialog */}
+      {showBackupTextImport && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-xl max-w-2xl w-full mx-auto max-h-[88vh] overflow-hidden flex flex-col">
+            <div className="flex items-start justify-between gap-4 mb-3">
+              <div>
+                <h3 className="text-lg font-black text-slate-900">粘贴备份文本恢复</h3>
+                <p className="text-xs font-bold text-slate-500 mt-1 leading-relaxed">
+                  把之前保存的完整 JSON 文本粘贴到这里，确认后会恢复规划并刷新页面。
+                </p>
+              </div>
+              <button
+                onClick={() => setShowBackupTextImport(false)}
+                className="p-2 rounded-lg text-slate-500 hover:bg-slate-100"
+                type="button"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <textarea
+              value={backupImportText}
+              onChange={(event) => setBackupImportText(event.target.value)}
+              className="min-h-[260px] flex-1 w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-3 font-mono text-[11px] leading-relaxed text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-400"
+              placeholder='请粘贴以 {"app":"maizhanpiao-foil-planner"... 开头的备份 JSON'
+            />
+            <div className="mt-4 flex flex-col sm:flex-row justify-end gap-2">
+              <button
+                onClick={() => setShowBackupTextImport(false)}
+                className="rounded-xl bg-slate-100 px-4 py-2 text-xs font-black text-slate-700 hover:bg-slate-200"
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleImportBackupText}
+                disabled={!backupImportText.trim()}
+                className="rounded-xl bg-blue-600 px-4 py-2 text-xs font-black text-white hover:bg-blue-700 disabled:opacity-50"
+                type="button"
+              >
+                导入并恢复
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Confirm Dialog Modal */}
       {confirmDialog && (

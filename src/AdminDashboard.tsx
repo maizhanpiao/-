@@ -1,8 +1,9 @@
 import React, { useMemo, useState } from "react";
-import { CalendarX, Database, ExternalLink, FileJson, RefreshCw, Trash2 } from "lucide-react";
+import { CalendarX, Database, Download, ExternalLink, FileJson, RefreshCw, Trash2 } from "lucide-react";
 
 const LOCAL_LINE_STATE_PREFIX = "foil_app_line_state";
 const DAILY_RECORD_PREFIX = "daily_records_data";
+const FULL_SNAPSHOT_PREFIX = "foil_app_full_snapshot";
 const ACCOUNT_STORAGE_KEY = "foil_app_accounts";
 const SESSION_STORAGE_KEY = "foil_app_session_user";
 const LOCAL_BACKUP_SUFFIX = "__backup";
@@ -13,6 +14,7 @@ function isAppLocalDataKey(key: string) {
     key === SESSION_STORAGE_KEY ||
     key === "adminAuth" ||
     key.startsWith(`${LOCAL_LINE_STATE_PREFIX}:`) ||
+    key.startsWith(`${FULL_SNAPSHOT_PREFIX}:`) ||
     key.startsWith(`${DAILY_RECORD_PREFIX}_`) ||
     key.endsWith(LOCAL_BACKUP_SUFFIX)
   );
@@ -20,6 +22,7 @@ function isAppLocalDataKey(key: string) {
 
 function getDataLabel(key: string) {
   if (key.endsWith(LOCAL_BACKUP_SUFFIX)) return "本地镜像备份";
+  if (key.startsWith(`${FULL_SNAPSHOT_PREFIX}:`)) return "完整备份版本";
   if (key === ACCOUNT_STORAGE_KEY) return "账号配置";
   if (key === SESSION_STORAGE_KEY) return "当前登录用户";
   if (key === "adminAuth") return "后台登录状态";
@@ -45,14 +48,21 @@ function getVersionCode(key: string, value: string) {
   const date = extractDateFromKey(key);
   const suffix = key.endsWith(LOCAL_BACKUP_SUFFIX) ? " 备份" : "";
   let timeLabel = "";
+  const keyTimeMatch = getBaseKey(key).match(/\d{4}-\d{2}-\d{2}-(\d{2})(\d{2})(?:\d{2})?/);
+  if (keyTimeMatch) {
+    timeLabel = ` ${keyTimeMatch[1]}:${keyTimeMatch[2]}`;
+  }
 
   try {
     const parsed = JSON.parse(value);
     const candidates = [
+      parsed?.savedAt,
       parsed?.updatedAt,
       parsed?.exportedAt,
       parsed?.timestamp,
       parsed?.createdAt,
+      parsed?.snapshot?.savedAt,
+      parsed?.snapshot?.currentTime,
     ];
     const dateCandidate = candidates.find((item) => typeof item === "string");
     if (dateCandidate) {
@@ -93,13 +103,15 @@ function getVersionParts(key: string, value: string) {
 function isDeletableKey(key: string) {
   return (
     key.startsWith(`${LOCAL_LINE_STATE_PREFIX}:`) ||
+    key.startsWith(`${FULL_SNAPSHOT_PREFIX}:`) ||
     key.startsWith(`${DAILY_RECORD_PREFIX}_`) ||
     key.endsWith(LOCAL_BACKUP_SUFFIX)
   );
 }
 
 function isLoadablePlanKey(key: string) {
-  return getBaseKey(key).startsWith(`${LOCAL_LINE_STATE_PREFIX}:`);
+  const baseKey = getBaseKey(key);
+  return baseKey.startsWith(`${LOCAL_LINE_STATE_PREFIX}:`) || baseKey.startsWith(`${FULL_SNAPSHOT_PREFIX}:`);
 }
 
 function safeFormatJson(value: string) {
@@ -147,8 +159,10 @@ function readLocalRows() {
 
 export default function AdminDashboard({
   onLoadSnapshot,
+  onSaveFullSnapshot,
 }: {
-  onLoadSnapshot?: (configs: any, splicing: any, washes: any, jointSlots?: any) => void;
+  onLoadSnapshot?: (configs: any, splicing: any, washes: any, jointSlots?: any, punchRecords?: any, jointCalibrationMarks?: any) => void;
+  onSaveFullSnapshot?: () => void;
 }) {
   const [refreshTick, setRefreshTick] = useState(0);
   const [selectedRow, setSelectedRow] = useState<ReturnType<typeof readLocalRows>[number] | null>(null);
@@ -157,11 +171,16 @@ export default function AdminDashboard({
   const loadPlan = (row: ReturnType<typeof readLocalRows>[number]) => {
     try {
       const parsed = JSON.parse(row.value);
+      const snapshot = parsed?.kind === "full_snapshot" && parsed?.snapshot
+        ? parsed.snapshot
+        : parsed;
       onLoadSnapshot?.(
-        parsed.lineConfigs,
-        parsed.activeSplicing,
-        parsed.lastWashes,
-        parsed.jointSlotConfigs,
+        snapshot.lineConfigs,
+        snapshot.activeSplicing,
+        snapshot.lastWashes,
+        snapshot.jointSlotConfigs,
+        snapshot.punchRecords,
+        snapshot.jointCalibrationMarks,
       );
     } catch {
       alert("这条本地数据解析失败，无法进入规划。");
@@ -213,6 +232,16 @@ export default function AdminDashboard({
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {onSaveFullSnapshot && (
+            <button
+              onClick={onSaveFullSnapshot}
+              className="px-4 py-2 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 text-xs font-black flex items-center justify-center gap-2"
+              type="button"
+            >
+              <Download size={14} />
+              保存完整备份
+            </button>
+          )}
           <button
             onClick={deleteOlderThanSevenDays}
             className="px-4 py-2 rounded-xl bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 text-xs font-black flex items-center justify-center gap-2"
