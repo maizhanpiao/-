@@ -543,7 +543,6 @@ function reviveLocalLineState(
   }
 }
 
-// 预留一些占位工艺段名称
 interface JointSlotConfig {
   id: string;
   name: string;
@@ -560,22 +559,92 @@ interface JointCalibrationMark {
   jointId?: string;
 }
 
-const DEFAULT_JOINT_SLOTS: JointSlotConfig[] = [
-  { id: "slot-1", name: "入口预处理槽", length: 40, uCount: 4 },
-  { id: "slot-2", name: "一段化成槽", length: 50, uCount: 5 },
-  { id: "slot-3", name: "二段化成槽", length: 50, uCount: 5 },
-  { id: "slot-4", name: "三段化成槽", length: 50, uCount: 5 },
-  { id: "slot-5", name: "后处理槽", length: 50, uCount: 5 },
+const DEFAULT_JOINT_STAGE_DEFINITIONS = [
+  ["对接槽", 0],
+  ["前处理槽", 5],
+  ["T2槽", 1],
+  ["1F槽", 2],
+  ["T3槽", 1],
+  ["2F槽", 2],
+  ["kp1槽", 1],
+  ["馈电1槽", 1],
+  ["w1槽", 1],
+  ["3F槽", 2],
+  ["kp2槽", 1],
+  ["馈电2槽", 1],
+  ["w2槽", 1],
+  ["4F槽", 3],
+  ["5F槽", 4],
+  ["kp3槽", 1],
+  ["馈电3槽", 1],
+  ["6f1槽", 4],
+  ["6F2槽", 4],
+  ["w4槽", 1],
+  ["磷酸1槽", 1],
+  ["w5槽", 1],
+  ["炉1", 0],
+  ["6f3槽", 2],
+  ["w7槽", 1],
+  ["磷酸2槽", 4],
+  ["w8槽", 2],
+  ["6f4槽", 2],
+  ["w9槽", 1],
+  ["炉2", 0],
+  ["6f5槽", 2],
+  ["w10槽", 1],
+  ["pa槽", 1],
+  ["w11槽", 2],
+  ["炉3", 0],
+] as const;
+
+const DEFAULT_JOINT_STAGE_WEIGHT = DEFAULT_JOINT_STAGE_DEFINITIONS.reduce(
+  (sum, [, uCount]) => sum + Math.max(1, uCount),
+  0,
+);
+
+const DEFAULT_JOINT_SLOTS: JointSlotConfig[] = DEFAULT_JOINT_STAGE_DEFINITIONS.map(
+  ([name, uCount], index) => ({
+    id: `joint-stage-${String(index + 1).padStart(2, "0")}`,
+    name,
+    length: Number(((240 * Math.max(1, uCount)) / DEFAULT_JOINT_STAGE_WEIGHT).toFixed(4)),
+    uCount,
+  }),
+);
+
+const LEGACY_JOINT_SLOT_NAMES = [
+  "入口预处理槽",
+  "一段化成槽",
+  "二段化成槽",
+  "三段化成槽",
+  "后处理槽",
 ];
 
+function isLegacyDefaultJointSlots(raw?: JointSlotConfig[]) {
+  return Boolean(
+    Array.isArray(raw) &&
+      raw.length === LEGACY_JOINT_SLOT_NAMES.length &&
+      raw.every((slot, index) => slot.name === LEGACY_JOINT_SLOT_NAMES[index]),
+  );
+}
+
 function normalizeJointSlots(raw?: JointSlotConfig[]) {
-  const source = Array.isArray(raw) && raw.length > 0 ? raw : DEFAULT_JOINT_SLOTS;
-  return source.map((slot, index) => ({
-    id: slot.id || `slot-${index + 1}`,
-    name: String(slot.name || `槽${index + 1}`),
-    length: Math.max(1, Number(slot.length) || DEFAULT_JOINT_SLOTS[index]?.length || 10),
-    uCount: Math.max(1, Math.round(Number(slot.uCount) || DEFAULT_JOINT_SLOTS[index]?.uCount || 1)),
-  }));
+  const source =
+    Array.isArray(raw) && raw.length > 0 && !isLegacyDefaultJointSlots(raw)
+      ? raw
+      : DEFAULT_JOINT_SLOTS;
+  return source.map((slot, index) => {
+    const rawUCount = Number(slot.uCount);
+    const fallbackUCount = DEFAULT_JOINT_SLOTS[index]?.uCount ?? 1;
+    return {
+      id: slot.id || `slot-${index + 1}`,
+      name: String(slot.name || `槽${index + 1}`),
+      length: Math.max(1, Number(slot.length) || DEFAULT_JOINT_SLOTS[index]?.length || 10),
+      uCount: Math.max(
+        0,
+        Math.round(Number.isFinite(rawUCount) ? rawUCount : fallbackUCount),
+      ),
+    };
+  });
 }
 
 interface PlannedRoll {
@@ -3359,13 +3428,15 @@ export default function App() {
     let cursor = 0;
     return slots.flatMap((slot, slotIndex) => {
       const slotLength = Number(slot.length || 0);
-      const points = Array.from({ length: Math.max(1, Number(slot.uCount || 1)) }, (_, idx) => {
-        const nominalPosition = cursor + ((idx + 0.5) / Math.max(1, slot.uCount)) * slotLength;
+      const pointCount = Math.max(1, Number(slot.uCount));
+      const points = Array.from({ length: pointCount }, (_, idx) => {
+        const uIndex = slot.uCount > 0 ? idx + 1 : 0;
+        const nominalPosition = cursor + ((idx + 0.5) / pointCount) * slotLength;
         return {
-          key: `${slot.id}:${idx + 1}`,
+          key: `${slot.id}:${uIndex}`,
           slot,
           slotIndex,
-          uIndex: idx + 1,
+          uIndex,
           nominalPosition: configuredTotal > 0 ? (nominalPosition / configuredTotal) * 240 : nominalPosition,
         };
       });
@@ -3469,7 +3540,7 @@ export default function App() {
           clampedDistance,
           status,
           currentSlot: calibratedLocation?.slot,
-          currentU: calibratedLocation?.uIndex || 1,
+          currentU: calibratedLocation?.uIndex ?? 0,
           inSlotDistance: Math.abs(calibratedLocation?.offsetToU || 0),
           totalSlotLength: 240,
           progress: (clampedDistance / 240) * 100,
@@ -5387,7 +5458,7 @@ export default function App() {
                               </div>
                               <div className="mt-1 text-2xl font-black text-white">
                                 {activeJoint.status === "追踪中"
-                                  ? `${activeJoint.currentSlot?.name || "未知槽"} · U${activeJoint.currentU}`
+                                  ? `${activeJoint.currentSlot?.name || "未知阶段"}${activeJoint.currentU > 0 ? ` · U${activeJoint.currentU}` : ""}`
                                   : activeJoint.status}
                               </div>
                               <div className="mt-1 text-[11px] font-bold text-slate-400">
@@ -5414,7 +5485,7 @@ export default function App() {
                         <div>
                           <h3 className="text-sm font-black text-slate-100">槽和 U 标定</h3>
                           <p className="text-[11px] font-bold text-slate-500 mt-1">
-                            接头实际走到某个 U 时，点“标记到达”，系统会记录该 U 的真实位置。
+                            接头实际走到某个 U 或无 U 阶段时，点“标记到达”记录真实位置。
                           </p>
                         </div>
                         <button
@@ -5431,16 +5502,20 @@ export default function App() {
                           <div key={slot.id} className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
                             <div className="flex items-center justify-between gap-3 mb-3">
                               <div className="font-black text-sm text-slate-200">{slot.name}</div>
-                              <div className="text-[10px] font-bold text-slate-500">{slot.uCount} 个 U</div>
+                              <div className="text-[10px] font-bold text-slate-500">
+                                {slot.uCount > 0 ? `${slot.uCount} 个 U` : "无 U"}
+                              </div>
                             </div>
                             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-                              {Array.from({ length: slot.uCount }, (_, idx) => {
-                                const uIndex = idx + 1;
+                              {Array.from({ length: Math.max(1, slot.uCount) }, (_, idx) => {
+                                const uIndex = slot.uCount > 0 ? idx + 1 : 0;
                                 const point = calibratedPoints.find((item) => item.slot.id === slot.id && item.uIndex === uIndex);
                                 return (
                                   <div key={`${slot.id}-${uIndex}`} className="rounded-lg bg-slate-900 border border-slate-800 p-2">
                                     <div className="flex items-center justify-between gap-2">
-                                      <span className="text-xs font-black text-slate-200">U{uIndex}</span>
+                                      <span className="text-xs font-black text-slate-200">
+                                        {uIndex > 0 ? `U${uIndex}` : "阶段定位点"}
+                                      </span>
                                       <span className={cn("text-[10px] font-mono font-black", point?.calibrated ? "text-emerald-300" : "text-slate-500")}>
                                         {point ? point.position.toFixed(1) : "--"}m
                                       </span>
@@ -5495,7 +5570,11 @@ export default function App() {
                                 </div>
                                 <div className="min-w-0">
                                   <div className="truncate text-xs font-black text-slate-200">
-                                    {isOut ? "已出生产线" : `${location?.slot.name || "未知槽"} · U${location?.uIndex || "-"}`}
+                                    {isOut
+                                      ? "已出生产线"
+                                      : location
+                                        ? `${location.slot.name}${location.uIndex > 0 ? ` · U${location.uIndex}` : ""}`
+                                        : "未知阶段"}
                                   </div>
                                   <div className="text-[10px] font-bold text-slate-500">
                                     {minute === 0 ? "当前" : `${minute} 分钟后`}
@@ -5544,6 +5623,7 @@ export default function App() {
                               <span className="block text-[9px] text-slate-500 font-bold mb-1">U</span>
                               <input
                                 type="number"
+                                min="0"
                                 value={slot.uCount}
                                 onChange={(e) => updateJointSlot(selectedLine, slot.id, { uCount: Number(e.target.value) })}
                                 className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 font-mono outline-none focus:border-blue-400"
