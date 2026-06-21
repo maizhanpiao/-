@@ -3801,12 +3801,17 @@ export default function App() {
       return;
     }
 
+    const now = new Date();
+    const previousReading = lineMeterReadings[lineId];
+    const previousLiveValue = previousReading
+      ? getLiveLineMeterValue(previousReading, now)
+      : null;
     const nextReadings = {
       ...lineMeterReadings,
       [lineId]: {
         value: Number(value.toFixed(2)),
         speed: Number(speed.toFixed(3)),
-        updatedAt: new Date().toISOString(),
+        updatedAt: now.toISOString(),
       },
     };
     try {
@@ -3817,7 +3822,49 @@ export default function App() {
       setLineMeterReadings(nextReadings);
       setLineMeterInputs((prev) => ({ ...prev, [lineId]: String(nextReadings[lineId].value) }));
       setLineMeterSpeedInputs((prev) => ({ ...prev, [lineId]: String(nextReadings[lineId].speed) }));
-      setLineMeterMessages((prev) => ({ ...prev, [lineId]: "已更新" }));
+      const correction = previousLiveValue === null ? null : value - previousLiveValue;
+      const successMessage = correction === null
+        ? "首次校对完成"
+        : `校对完成，修正 ${correction >= 0 ? "+" : ""}${correction.toFixed(2)}m`;
+      setLineMeterMessages((prev) => ({ ...prev, [lineId]: successMessage }));
+    } catch {
+      setLineMeterMessages((prev) => ({ ...prev, [lineId]: "保存失败，请检查本地空间" }));
+    }
+  };
+
+  const handleAdjustLineMeterSpeed = (lineId: LineId) => {
+    const normalizedSpeed = String(lineMeterSpeedInputs[lineId] || "").trim().replace(",", ".");
+    const speed = Number(normalizedSpeed);
+    if (!normalizedSpeed || !Number.isFinite(speed) || speed < 0) {
+      setLineMeterMessages((prev) => ({ ...prev, [lineId]: "请输入有效车速" }));
+      return;
+    }
+
+    const reading = lineMeterReadings[lineId];
+    const now = new Date();
+    const liveValue = reading ? getLiveLineMeterValue(reading, now) : null;
+    if (liveValue === null) {
+      setLineMeterMessages((prev) => ({ ...prev, [lineId]: "请先同步真实米数" }));
+      return;
+    }
+
+    const nextReadings = {
+      ...lineMeterReadings,
+      [lineId]: {
+        value: Number(liveValue.toFixed(6)),
+        speed: Number(speed.toFixed(3)),
+        updatedAt: now.toISOString(),
+      },
+    };
+    try {
+      writeLocalStorageWithBackup(
+        getRealtimeMeterStorageKey(appUser.username),
+        JSON.stringify(nextReadings),
+      );
+      setLineMeterReadings(nextReadings);
+      setLineMeterInputs((prev) => ({ ...prev, [lineId]: liveValue.toFixed(2) }));
+      setLineMeterSpeedInputs((prev) => ({ ...prev, [lineId]: String(nextReadings[lineId].speed) }));
+      setLineMeterMessages((prev) => ({ ...prev, [lineId]: "车速已调整" }));
     } catch {
       setLineMeterMessages((prev) => ({ ...prev, [lineId]: "保存失败，请检查本地空间" }));
     }
@@ -5681,10 +5728,13 @@ export default function App() {
                           handleSaveLineMeter(lineId);
                         }}
                       >
+                        <div className="mb-3 text-sm font-black text-slate-800">
+                          现场重新校对
+                        </div>
                         <div className="grid grid-cols-2 gap-2">
                           <label className="min-w-0">
                             <span className="mb-1.5 block text-[11px] font-black text-slate-500">
-                              当前真实米数
+                              收箔机当前米数
                             </span>
                             <div className="flex min-w-0 items-center rounded-lg border border-slate-300 bg-white focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/15">
                               <input
@@ -5706,7 +5756,7 @@ export default function App() {
                           </label>
                           <label className="min-w-0">
                             <span className="mb-1.5 block text-[11px] font-black text-slate-500">
-                              当前车速
+                              现场实际车速
                             </span>
                             <div className="flex min-w-0 items-center rounded-lg border border-slate-300 bg-white focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/15">
                               <input
@@ -5727,23 +5777,33 @@ export default function App() {
                             </div>
                           </label>
                         </div>
-                        <button
-                          type="submit"
-                          className={cn(
-                            "mt-3 w-full rounded-lg px-4 py-3 text-sm font-black text-white active:scale-95",
-                            index === 0
-                              ? "bg-blue-600 hover:bg-blue-700"
-                              : index === 1
-                                ? "bg-emerald-600 hover:bg-emerald-700"
-                                : "bg-orange-600 hover:bg-orange-700",
-                          )}
-                        >
-                          同步并开始走米
-                        </button>
+                        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+                          <button
+                            type="submit"
+                            className={cn(
+                              "rounded-lg px-3 py-3 text-sm font-black text-white active:scale-95",
+                              index === 0
+                                ? "bg-blue-600 hover:bg-blue-700"
+                                : index === 1
+                                  ? "bg-emerald-600 hover:bg-emerald-700"
+                                  : "bg-orange-600 hover:bg-orange-700",
+                            )}
+                          >
+                            按现场数据重新校对
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAdjustLineMeterSpeed(lineId)}
+                            className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-slate-100 px-3 py-3 text-sm font-black text-slate-700 hover:bg-slate-200 active:scale-95"
+                          >
+                            <Gauge size={15} /> 仅调整车速
+                          </button>
+                        </div>
                         <div
                           className={cn(
                             "mt-2 min-h-4 text-[11px] font-black",
-                            lineMeterMessages[lineId] === "已更新"
+                            lineMeterMessages[lineId]?.includes("校对完成") ||
+                            lineMeterMessages[lineId] === "车速已调整"
                               ? "text-emerald-600"
                               : "text-red-500",
                           )}
