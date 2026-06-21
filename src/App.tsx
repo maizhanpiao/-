@@ -44,7 +44,8 @@ import {
   Share2,
   Upload,
   BellRing,
-  Play
+  Play,
+  Gauge
 } from "lucide-react";
 import { cn } from "./lib/utils";
 import DailyRecordPage from "./DailyRecordPage";
@@ -281,6 +282,12 @@ interface AppAccount {
   lines: AssignedLine[];
 }
 
+interface LineMeterReading {
+  value: number | null;
+  speed: number | null;
+  updatedAt: string | null;
+}
+
 const DEFAULT_LINE_ASSIGNMENTS: AssignedLine[] = [
   { id: "24", speed: 1.35 },
   { id: "25", speed: 1.30 },
@@ -290,6 +297,7 @@ const DEFAULT_LINE_ASSIGNMENTS: AssignedLine[] = [
 const ACCOUNT_STORAGE_KEY = "foil_app_accounts";
 const SESSION_STORAGE_KEY = "foil_app_session_user";
 const LOCAL_LINE_STATE_PREFIX = "foil_app_line_state";
+const REALTIME_METER_PREFIX = "foil_app_realtime_meters";
 const DAILY_RECORD_PREFIX = "daily_records_data";
 const FULL_SNAPSHOT_PREFIX = "foil_app_full_snapshot";
 const LOCAL_RETENTION_DAYS = 14;
@@ -318,6 +326,7 @@ function isAppLocalDataKey(key: string) {
     key === SESSION_STORAGE_KEY ||
     key === "adminAuth" ||
     key.startsWith(`${LOCAL_LINE_STATE_PREFIX}:`) ||
+    key.startsWith(`${REALTIME_METER_PREFIX}:`) ||
     key.startsWith(`${FULL_SNAPSHOT_PREFIX}:`) ||
     key.startsWith(`${DAILY_RECORD_PREFIX}_`) ||
     key.endsWith(LOCAL_BACKUP_SUFFIX)
@@ -412,6 +421,51 @@ function createLineDateMap<T>(lines: AssignedLine[], value: T) {
     acc[line.id] = value;
     return acc;
   }, {});
+}
+
+function createLineMeterMap(lines: AssignedLine[]) {
+  return normalizeLines(lines).reduce<Record<LineId, LineMeterReading>>((acc, line) => {
+    acc[line.id] = { value: null, speed: null, updatedAt: null };
+    return acc;
+  }, {});
+}
+
+function normalizeLineMeterReadings(raw: unknown, lines: AssignedLine[]) {
+  const source = raw && typeof raw === "object"
+    ? raw as Record<string, { value?: unknown; speed?: unknown; updatedAt?: unknown }>
+    : {};
+  return normalizeLines(lines).reduce<Record<LineId, LineMeterReading>>((acc, line) => {
+    const rawValue = source[line.id]?.value;
+    const rawSpeed = source[line.id]?.speed;
+    const rawUpdatedAt = source[line.id]?.updatedAt;
+    const value = rawValue === null || rawValue === undefined || rawValue === ""
+      ? null
+      : Number(rawValue);
+    const speed = rawSpeed === null || rawSpeed === undefined || rawSpeed === ""
+      ? null
+      : Number(rawSpeed);
+    acc[line.id] = {
+      value: value !== null && Number.isFinite(value) && value >= 0 ? value : null,
+      speed: speed !== null && Number.isFinite(speed) && speed >= 0 ? speed : null,
+      updatedAt: typeof rawUpdatedAt === "string"
+        ? rawUpdatedAt || null
+        : null,
+    };
+    return acc;
+  }, {});
+}
+
+function getRealtimeMeterStorageKey(username: string) {
+  return `${REALTIME_METER_PREFIX}:${username}`;
+}
+
+function getLiveLineMeterValue(reading: LineMeterReading, now = new Date()) {
+  if (reading.value === null) return null;
+  if (reading.speed === null || !reading.updatedAt) return reading.value;
+  const startedAt = new Date(reading.updatedAt);
+  if (Number.isNaN(startedAt.getTime())) return reading.value;
+  const elapsedMinutes = Math.max(0, (now.getTime() - startedAt.getTime()) / 60000);
+  return reading.value + elapsedMinutes * reading.speed;
 }
 
 function createJointSlotMap(lines: AssignedLine[]) {
@@ -610,6 +664,42 @@ const DEFAULT_JOINT_SLOTS: JointSlotConfig[] = DEFAULT_JOINT_STAGE_DEFINITIONS.m
     uCount,
   }),
 );
+
+// 生产线实测默认位置，车速 1.34 m/min；键格式为“阶段ID:U序号”，无 U 阶段使用 0。
+const DEFAULT_JOINT_CALIBRATION_POSITIONS: Record<string, number> = {
+  "joint-stage-02:5": 42.5,
+  "joint-stage-04:2": 50.6,
+  "joint-stage-05:1": 54.5,
+  "joint-stage-06:1": 55.4,
+  "joint-stage-06:2": 59.5,
+  "joint-stage-07:1": 63.5,
+  "joint-stage-08:1": 66.0,
+  "joint-stage-09:1": 70.2,
+  "joint-stage-10:1": 73.1,
+  "joint-stage-10:2": 77.4,
+  "joint-stage-11:1": 81.3,
+  "joint-stage-12:1": 84.3,
+  "joint-stage-13:1": 88.2,
+  "joint-stage-14:1": 91.3,
+  "joint-stage-14:2": 95.2,
+  "joint-stage-14:3": 98.8,
+  "joint-stage-15:1": 102.5,
+  "joint-stage-25:1": 179.7,
+  "joint-stage-26:1": 182.5,
+  "joint-stage-26:2": 186.6,
+  "joint-stage-26:3": 190.2,
+  "joint-stage-27:1": 193.7,
+  "joint-stage-27:2": 196.3,
+  "joint-stage-28:1": 199.2,
+  "joint-stage-28:2": 203.6,
+  "joint-stage-31:1": 213.6,
+  "joint-stage-31:2": 217.6,
+  "joint-stage-32:1": 224.3,
+  "joint-stage-33:1": 228.1,
+  "joint-stage-34:1": 228.8,
+  "joint-stage-34:2": 231.6,
+  "joint-stage-35:0": 234.1,
+};
 
 const LEGACY_JOINT_SLOT_NAMES = [
   "入口预处理槽",
@@ -2403,7 +2493,7 @@ export default function App() {
   const [simDateStr, setSimDateStr] = useState("");
   const [simTimeStr, setSimTimeStr] = useState("");
 
-  const [activePage, setActivePage] = useState<"dashboard" | "plan" | "admin" | "settings" | "daily_record" | "users" | "joint_tracking">("dashboard");
+  const [activePage, setActivePage] = useState<"dashboard" | "plan" | "admin" | "settings" | "daily_record" | "users" | "joint_tracking" | "line_meters">("dashboard");
 
   // -- Shift info --
   const shiftInfo = getShiftInfo(currentTime);
@@ -2507,6 +2597,16 @@ export default function App() {
   const [jointCalibrationMarks, setJointCalibrationMarks] = useState<Record<LineId, JointCalibrationMark[]>>(() =>
     createJointCalibrationMap(lineAssignments),
   );
+  const [lineMeterReadings, setLineMeterReadings] = useState<Record<LineId, LineMeterReading>>(() =>
+    createLineMeterMap(lineAssignments),
+  );
+  const [lineMeterInputs, setLineMeterInputs] = useState<Record<LineId, string>>(() =>
+    createLineDateMap(lineAssignments, ""),
+  );
+  const [lineMeterSpeedInputs, setLineMeterSpeedInputs] = useState<Record<LineId, string>>(() =>
+    createLineDateMap(lineAssignments, ""),
+  );
+  const [lineMeterMessages, setLineMeterMessages] = useState<Record<LineId, string>>({});
 
   // -- line config states --
   const [lineConfigs, setLineConfigs] = useState<
@@ -2618,8 +2718,59 @@ export default function App() {
     }));
     setJointSlotConfigs((prev) => mergeJointSlotConfigs(prev, lineAssignments));
     setJointCalibrationMarks((prev) => mergeJointCalibrationMarks(prev, lineAssignments));
+    setLineMeterReadings((prev) => normalizeLineMeterReadings(prev, lineAssignments));
+    setLineMeterInputs((prev) => ({
+      ...createLineDateMap(lineAssignments, ""),
+      ...Object.fromEntries(
+        activeLines
+          .filter((line) => Object.prototype.hasOwnProperty.call(prev, line))
+          .map((line) => [line, prev[line]]),
+      ),
+    }));
+    setLineMeterSpeedInputs((prev) => ({
+      ...createLineDateMap(lineAssignments, ""),
+      ...Object.fromEntries(
+        activeLines
+          .filter((line) => Object.prototype.hasOwnProperty.call(prev, line))
+          .map((line) => [line, prev[line]]),
+      ),
+    }));
     setSelectedLine((prev) => (activeLines.includes(prev) ? prev : activeLines[0]));
   }, [activeLines, lineAssignments]);
+
+  useEffect(() => {
+    if (!appUser) return;
+    let parsed: unknown = null;
+    try {
+      const saved = readLocalStorageWithBackup(getRealtimeMeterStorageKey(appUser.username));
+      parsed = saved ? JSON.parse(saved) : null;
+    } catch {
+      parsed = null;
+    }
+    const restored = normalizeLineMeterReadings(parsed, lineAssignments);
+    setLineMeterReadings(restored);
+    setLineMeterInputs(
+      Object.fromEntries(
+        activeLines.map((line) => [
+          line,
+          restored[line]?.value === null || restored[line]?.value === undefined
+            ? ""
+            : String(restored[line].value),
+        ]),
+      ),
+    );
+    setLineMeterSpeedInputs(
+      Object.fromEntries(
+        activeLines.map((line) => [
+          line,
+          restored[line]?.speed === null || restored[line]?.speed === undefined
+            ? ""
+            : String(restored[line].speed),
+        ]),
+      ),
+    );
+    setLineMeterMessages({});
+  }, [appUser, activeLines, lineAssignments]);
 
   useEffect(() => {
     if (!appUser) return;
@@ -3437,6 +3588,7 @@ export default function App() {
           slot,
           slotIndex,
           uIndex,
+          defaultPosition: DEFAULT_JOINT_CALIBRATION_POSITIONS[`${slot.id}:${uIndex}`],
           nominalPosition: configuredTotal > 0 ? (nominalPosition / configuredTotal) * 240 : nominalPosition,
         };
       });
@@ -3451,9 +3603,18 @@ export default function App() {
     const markMap = new Map<string, JointCalibrationMark>(marks.map((mark) => [`${mark.slotId}:${mark.uIndex}`, mark]));
     const seeded = points.map((point) => {
       const mark = markMap.get(point.key);
+      const hasDefaultPosition =
+        typeof point.defaultPosition === "number" && Number.isFinite(point.defaultPosition);
       return {
         ...point,
-        measuredPosition: mark ? Math.max(0, Math.min(240, Number(mark.position || 0))) : null,
+        measuredPosition: mark
+          ? Math.max(0, Math.min(240, Number(mark.position || 0)))
+          : hasDefaultPosition
+            ? Number(point.defaultPosition)
+            : null,
+        manuallyCalibrated: Boolean(mark),
+        fromDefault: !mark && hasDefaultPosition,
+        hasDefaultPosition,
         markedAt: mark?.markedAt,
         jointId: mark?.jointId,
       };
@@ -3461,7 +3622,11 @@ export default function App() {
 
     return seeded.map((point, index) => {
       if (point.measuredPosition !== null) {
-        return { ...point, position: point.measuredPosition, calibrated: true };
+        return {
+          ...point,
+          position: point.measuredPosition,
+          calibrated: point.manuallyCalibrated,
+        };
       }
 
       const prev = [...seeded.slice(0, index)].reverse().find((item) => item.measuredPosition !== null);
@@ -3481,6 +3646,7 @@ export default function App() {
         ...point,
         position: Math.max(0, Math.min(240, position)),
         calibrated: false,
+        fromDefault: false,
       };
     }).sort((a, b) => a.position - b.position);
   };
@@ -3615,6 +3781,45 @@ export default function App() {
             : normalizeLines(updatedUser.lines)[0].id
         ));
       }
+    }
+  };
+
+  const handleSaveLineMeter = (lineId: LineId) => {
+    const normalizedInput = String(lineMeterInputs[lineId] || "").trim().replace(",", ".");
+    const normalizedSpeed = String(lineMeterSpeedInputs[lineId] || "").trim().replace(",", ".");
+    const value = Number(normalizedInput);
+    const speed = Number(normalizedSpeed);
+    if (
+      !normalizedInput ||
+      !normalizedSpeed ||
+      !Number.isFinite(value) ||
+      !Number.isFinite(speed) ||
+      value < 0 ||
+      speed < 0
+    ) {
+      setLineMeterMessages((prev) => ({ ...prev, [lineId]: "请输入有效米数和车速" }));
+      return;
+    }
+
+    const nextReadings = {
+      ...lineMeterReadings,
+      [lineId]: {
+        value: Number(value.toFixed(2)),
+        speed: Number(speed.toFixed(3)),
+        updatedAt: new Date().toISOString(),
+      },
+    };
+    try {
+      writeLocalStorageWithBackup(
+        getRealtimeMeterStorageKey(appUser.username),
+        JSON.stringify(nextReadings),
+      );
+      setLineMeterReadings(nextReadings);
+      setLineMeterInputs((prev) => ({ ...prev, [lineId]: String(nextReadings[lineId].value) }));
+      setLineMeterSpeedInputs((prev) => ({ ...prev, [lineId]: String(nextReadings[lineId].speed) }));
+      setLineMeterMessages((prev) => ({ ...prev, [lineId]: "已更新" }));
+    } catch {
+      setLineMeterMessages((prev) => ({ ...prev, [lineId]: "保存失败，请检查本地空间" }));
     }
   };
 
@@ -3871,6 +4076,17 @@ export default function App() {
               )}
             >
               <LayoutDashboard size={16} /> 工作台指引
+            </button>
+            <button
+              onClick={() => { setActivePage("line_meters"); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
+                activePage === "line_meters"
+                  ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
+                  : "hover:bg-slate-800 text-slate-300 hover:text-white",
+              )}
+            >
+              <Gauge size={16} /> 实时米数
             </button>
             <button
               onClick={() => { setActivePage("plan"); setIsMobileMenuOpen(false); }}
@@ -5382,6 +5598,165 @@ export default function App() {
 
             </div>
           </div>
+        ) : activePage === "line_meters" ? (
+          <div className="flex-1 overflow-auto bg-slate-50 p-4 sm:rounded-2xl sm:border sm:border-slate-200 sm:p-6">
+            <div className="mx-auto w-full max-w-5xl">
+              <div className="mb-6 flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setActivePage("dashboard")}
+                  className="lg:hidden -ml-2 flex shrink-0 items-center gap-1 rounded-lg p-2 text-slate-600 hover:bg-slate-200"
+                >
+                  <ChevronLeft size={24} />
+                  <span className="text-sm font-bold">主页</span>
+                </button>
+                <div className="hidden h-10 w-10 items-center justify-center rounded-lg bg-blue-100 text-blue-700 sm:flex">
+                  <Gauge size={21} />
+                </div>
+                <div>
+                  <h2 className="text-xl font-black text-slate-900 sm:text-2xl">生产线实时米数</h2>
+                  <div className="mt-1 text-xs font-bold text-slate-500">
+                    收箔机读数
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                {activeLines.map((lineId, index) => {
+                  const reading = lineMeterReadings[lineId] || { value: null, speed: null, updatedAt: null };
+                  const liveValue = getLiveLineMeterValue(reading, new Date());
+                  const updatedDate = reading.updatedAt ? new Date(reading.updatedAt) : null;
+                  const hasValidDate = updatedDate && !Number.isNaN(updatedDate.getTime());
+                  return (
+                    <section
+                      key={lineId}
+                      className={cn(
+                        "rounded-lg border bg-white p-5 shadow-sm",
+                        index === 0
+                          ? "border-blue-200"
+                          : index === 1
+                            ? "border-emerald-200"
+                            : "border-orange-200",
+                      )}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div
+                          className={cn(
+                            "rounded-md px-3 py-1.5 text-sm font-black",
+                            index === 0
+                              ? "bg-blue-100 text-blue-800"
+                              : index === 1
+                                ? "bg-emerald-100 text-emerald-800"
+                                : "bg-orange-100 text-orange-800",
+                          )}
+                        >
+                          {lineId}# 生产线
+                        </div>
+                        <Gauge size={19} className="text-slate-400" />
+                      </div>
+
+                      <div className="mt-7 flex min-h-[76px] items-end gap-2">
+                        <span className="min-w-0 break-all font-mono text-4xl font-black leading-none text-slate-900 sm:text-5xl">
+                          {liveValue === null ? "--" : liveValue.toFixed(2)}
+                        </span>
+                        <span className="pb-1 text-lg font-black text-slate-400">m</span>
+                      </div>
+                      <div className="mt-3 flex min-h-5 flex-wrap items-center gap-x-3 gap-y-1 text-xs font-bold text-slate-500">
+                        <span>
+                          {hasValidDate
+                            ? `校准于 ${format(updatedDate, "MM-dd HH:mm:ss")}`
+                            : "尚未录入"}
+                        </span>
+                        {reading.speed !== null && (
+                          <span className="font-mono text-slate-700">
+                            {reading.speed.toFixed(2)} m/min
+                          </span>
+                        )}
+                      </div>
+
+                      <form
+                        className="mt-6 border-t border-slate-100 pt-4"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          handleSaveLineMeter(lineId);
+                        }}
+                      >
+                        <div className="grid grid-cols-2 gap-2">
+                          <label className="min-w-0">
+                            <span className="mb-1.5 block text-[11px] font-black text-slate-500">
+                              当前真实米数
+                            </span>
+                            <div className="flex min-w-0 items-center rounded-lg border border-slate-300 bg-white focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/15">
+                              <input
+                                type="number"
+                                inputMode="decimal"
+                                min="0"
+                                step="0.01"
+                                value={lineMeterInputs[lineId] || ""}
+                                onChange={(event) => {
+                                  setLineMeterInputs((prev) => ({ ...prev, [lineId]: event.target.value }));
+                                  setLineMeterMessages((prev) => ({ ...prev, [lineId]: "" }));
+                                }}
+                                onFocus={(event) => event.currentTarget.select()}
+                                className="min-w-0 flex-1 bg-transparent px-3 py-3 font-mono text-base font-black text-slate-900 outline-none"
+                                placeholder="0.00"
+                              />
+                              <span className="pr-2 text-xs font-bold text-slate-400">m</span>
+                            </div>
+                          </label>
+                          <label className="min-w-0">
+                            <span className="mb-1.5 block text-[11px] font-black text-slate-500">
+                              当前车速
+                            </span>
+                            <div className="flex min-w-0 items-center rounded-lg border border-slate-300 bg-white focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/15">
+                              <input
+                                type="number"
+                                inputMode="decimal"
+                                min="0"
+                                step="0.01"
+                                value={lineMeterSpeedInputs[lineId] || ""}
+                                onChange={(event) => {
+                                  setLineMeterSpeedInputs((prev) => ({ ...prev, [lineId]: event.target.value }));
+                                  setLineMeterMessages((prev) => ({ ...prev, [lineId]: "" }));
+                                }}
+                                onFocus={(event) => event.currentTarget.select()}
+                                className="min-w-0 flex-1 bg-transparent px-3 py-3 font-mono text-base font-black text-slate-900 outline-none"
+                                placeholder="1.34"
+                              />
+                              <span className="pr-2 text-[10px] font-bold text-slate-400">m/min</span>
+                            </div>
+                          </label>
+                        </div>
+                        <button
+                          type="submit"
+                          className={cn(
+                            "mt-3 w-full rounded-lg px-4 py-3 text-sm font-black text-white active:scale-95",
+                            index === 0
+                              ? "bg-blue-600 hover:bg-blue-700"
+                              : index === 1
+                                ? "bg-emerald-600 hover:bg-emerald-700"
+                                : "bg-orange-600 hover:bg-orange-700",
+                          )}
+                        >
+                          同步并开始走米
+                        </button>
+                        <div
+                          className={cn(
+                            "mt-2 min-h-4 text-[11px] font-black",
+                            lineMeterMessages[lineId] === "已更新"
+                              ? "text-emerald-600"
+                              : "text-red-500",
+                          )}
+                        >
+                          {lineMeterMessages[lineId] || ""}
+                        </div>
+                      </form>
+                    </section>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         ) : activePage === "joint_tracking" ? (
           <div className="bg-slate-950 text-slate-100 flex-1 overflow-auto p-4 sm:p-6 sm:rounded-3xl shadow-sm border border-slate-800">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5">
@@ -5426,7 +5801,17 @@ export default function App() {
               const joints = getJointTrackingForLine(selectedLine);
               const activeJoint = joints.find((joint) => joint.status === "追踪中") || joints[0];
               const calibratedPoints = getCalibratedUPointsForLine(selectedLine);
-              const measuredCount = calibratedPoints.filter((point) => point.calibrated).length;
+              const measuredCount = calibratedPoints.filter(
+                (point) => point.calibrated || point.fromDefault,
+              ).length;
+              const canLocateCurrentSlot =
+                activeJoint?.status === "追踪中" && Boolean(activeJoint.currentSlot?.id);
+              const scrollToCurrentSlot = () => {
+                if (!activeJoint?.currentSlot?.id) return;
+                document
+                  .getElementById(`joint-slot-card-${selectedLine}-${activeJoint.currentSlot.id}`)
+                  ?.scrollIntoView({ behavior: "smooth", block: "center" });
+              };
 
               return (
                 <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)] gap-5">
@@ -5476,30 +5861,58 @@ export default function App() {
                               style={{ width: `${Math.max(0, Math.min(100, activeJoint.progress))}%` }}
                             />
                           </div>
+                          <button
+                            type="button"
+                            disabled={!canLocateCurrentSlot}
+                            onClick={scrollToCurrentSlot}
+                            className="mt-4 w-full rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm font-black text-emerald-300 hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-40 flex items-center justify-center gap-2"
+                          >
+                            <MapPin size={16} />
+                            一键到目前槽
+                          </button>
                         </div>
                       )}
                     </section>
 
                     <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:p-5">
-                      <div className="flex items-center justify-between gap-3 mb-4">
+                      <div className="sticky top-0 z-20 -mx-2 mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900/95 px-2 py-3 backdrop-blur">
                         <div>
                           <h3 className="text-sm font-black text-slate-100">槽和 U 标定</h3>
                           <p className="text-[11px] font-bold text-slate-500 mt-1">
                             接头实际走到某个 U 或无 U 阶段时，点“标记到达”记录真实位置。
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => setJointCalibrationMarks((prev) => ({ ...prev, [selectedLine]: [] }))}
-                          className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-[10px] font-black text-slate-300 hover:bg-slate-800"
-                        >
-                          清空标定
-                        </button>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            disabled={!canLocateCurrentSlot}
+                            onClick={scrollToCurrentSlot}
+                            className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[10px] font-black text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 flex items-center gap-1"
+                          >
+                            <MapPin size={12} /> 目前槽
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setJointCalibrationMarks((prev) => ({ ...prev, [selectedLine]: [] }))}
+                            className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-[10px] font-black text-slate-300 hover:bg-slate-800"
+                          >
+                            清除手动标定
+                          </button>
+                        </div>
                       </div>
 
                       <div className="space-y-3">
                         {normalizeJointSlots(jointSlotConfigs[selectedLine]).map((slot) => (
-                          <div key={slot.id} className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                          <div
+                            id={`joint-slot-card-${selectedLine}-${slot.id}`}
+                            key={slot.id}
+                            className={cn(
+                              "scroll-mt-24 rounded-xl border bg-slate-950/60 p-3 transition-all",
+                              activeJoint?.status === "追踪中" && activeJoint.currentSlot?.id === slot.id
+                                ? "border-emerald-400 ring-2 ring-emerald-400/30 bg-emerald-500/5"
+                                : "border-slate-800",
+                            )}
+                          >
                             <div className="flex items-center justify-between gap-3 mb-3">
                               <div className="font-black text-sm text-slate-200">{slot.name}</div>
                               <div className="text-[10px] font-bold text-slate-500">
@@ -5510,13 +5923,30 @@ export default function App() {
                               {Array.from({ length: Math.max(1, slot.uCount) }, (_, idx) => {
                                 const uIndex = slot.uCount > 0 ? idx + 1 : 0;
                                 const point = calibratedPoints.find((item) => item.slot.id === slot.id && item.uIndex === uIndex);
+                                const isCurrentU =
+                                  activeJoint?.status === "追踪中" &&
+                                  activeJoint.currentSlot?.id === slot.id &&
+                                  activeJoint.currentU === uIndex;
                                 return (
-                                  <div key={`${slot.id}-${uIndex}`} className="rounded-lg bg-slate-900 border border-slate-800 p-2">
+                                  <div
+                                    key={`${slot.id}-${uIndex}`}
+                                    className={cn(
+                                      "rounded-lg bg-slate-900 border p-2 transition-all",
+                                      isCurrentU
+                                        ? "border-orange-400 ring-2 ring-orange-400/25"
+                                        : "border-slate-800",
+                                    )}
+                                  >
                                     <div className="flex items-center justify-between gap-2">
                                       <span className="text-xs font-black text-slate-200">
                                         {uIndex > 0 ? `U${uIndex}` : "阶段定位点"}
                                       </span>
-                                      <span className={cn("text-[10px] font-mono font-black", point?.calibrated ? "text-emerald-300" : "text-slate-500")}>
+                                      <span className={cn(
+                                        "text-[10px] font-mono font-black",
+                                        point?.calibrated || point?.fromDefault
+                                          ? "text-emerald-300"
+                                          : "text-slate-500",
+                                      )}>
                                         {point ? point.position.toFixed(1) : "--"}m
                                       </span>
                                     </div>
@@ -5531,10 +5961,17 @@ export default function App() {
                                       </button>
                                       <button
                                         type="button"
+                                        disabled={!point?.calibrated}
                                         onClick={() => clearJointUPosition(selectedLine, slot.id, uIndex)}
-                                        className="rounded bg-slate-800 px-2 py-1.5 text-[10px] font-black text-slate-300"
+                                        className="rounded bg-slate-800 px-2 py-1.5 text-[10px] font-black text-slate-300 disabled:opacity-45"
                                       >
-                                        清除
+                                        {point?.calibrated
+                                          ? point.hasDefaultPosition
+                                            ? "恢复默认"
+                                            : "清除"
+                                          : point?.fromDefault
+                                            ? "默认值"
+                                            : "清除"}
                                       </button>
                                     </div>
                                   </div>
