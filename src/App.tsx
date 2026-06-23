@@ -497,7 +497,33 @@ function mergeJointCalibrationMarks(
   lines: AssignedLine[],
 ) {
   return normalizeLines(lines).reduce<Record<LineId, JointCalibrationMark[]>>((acc, line) => {
-    acc[line.id] = Array.isArray(prev?.[line.id]) ? prev[line.id] : [];
+    const migratedMarks = (Array.isArray(prev?.[line.id]) ? prev[line.id] : []).map((mark) => {
+      const furnaceMigratedMark = DEFAULT_FURNACE_STAGE_IDS.has(mark.slotId) && mark.uIndex === 0
+        ? {
+            ...mark,
+            id: `${mark.slotId}:1`,
+            uIndex: 1,
+          }
+        : mark;
+      if ((furnaceMigratedMark.positionRevision || 0) < JOINT_POSITION_DATA_REVISION) {
+        return {
+          ...furnaceMigratedMark,
+          position: shouldShiftLegacyJointPosition(
+            furnaceMigratedMark.slotId,
+            furnaceMigratedMark.uIndex,
+          )
+            ? Number((Number(furnaceMigratedMark.position) - 2).toFixed(2))
+            : Number(furnaceMigratedMark.position),
+          positionRevision: JOINT_POSITION_DATA_REVISION,
+        };
+      }
+      return furnaceMigratedMark;
+    });
+    const deduplicated = new Map<string, JointCalibrationMark>();
+    migratedMarks
+      .sort((a, b) => new Date(a.markedAt).getTime() - new Date(b.markedAt).getTime())
+      .forEach((mark) => deduplicated.set(`${mark.slotId}:${mark.uIndex}`, mark));
+    acc[line.id] = [...deduplicated.values()];
     return acc;
   }, {});
 }
@@ -611,7 +637,10 @@ interface JointCalibrationMark {
   position: number;
   markedAt: string;
   jointId?: string;
+  positionRevision?: number;
 }
+
+const JOINT_POSITION_DATA_REVISION = 2;
 
 const DEFAULT_JOINT_STAGE_DEFINITIONS = [
   ["对接槽", 0],
@@ -636,23 +665,63 @@ const DEFAULT_JOINT_STAGE_DEFINITIONS = [
   ["w4槽", 1],
   ["磷酸1槽", 1],
   ["w5槽", 1],
-  ["炉1", 0],
+  ["炉1", 2],
   ["6f3槽", 2],
   ["w7槽", 1],
   ["磷酸2槽", 4],
   ["w8槽", 2],
   ["6f4槽", 2],
   ["w9槽", 1],
-  ["炉2", 0],
+  ["炉2", 2],
   ["6f5槽", 2],
   ["w10槽", 1],
   ["pa槽", 1],
   ["w11槽", 2],
-  ["炉3", 0],
+  ["炉3", 2],
 ] as const;
 
+const DEFAULT_FURNACE_STAGE_IDS = new Set([
+  "joint-stage-23",
+  "joint-stage-30",
+  "joint-stage-35",
+]);
+
+function isFurnaceJointSlot(slot: Pick<JointSlotConfig, "id" | "name">) {
+  return DEFAULT_FURNACE_STAGE_IDS.has(slot.id) || /^炉[123]$/.test(slot.name.trim());
+}
+
+function getJointPointLabel(slot: JointSlotConfig, uIndex: number) {
+  if (isFurnaceJointSlot(slot)) {
+    if (uIndex === 1) return "炉前";
+    if (uIndex === 2) return "炉后";
+  }
+  return uIndex > 0 ? `U${uIndex}` : "阶段定位点";
+}
+
+function isInitialJointTrackingPoint(slot: JointSlotConfig, uIndex: number) {
+  return slot.id === "joint-stage-02" && (uIndex === 4 || uIndex === 5);
+}
+
+function canMarkJointTrackingPoint(slot: JointSlotConfig, uIndex: number) {
+  if (slot.id === "joint-stage-01") return false;
+  if (slot.id === "joint-stage-02" && uIndex > 0 && uIndex < 4) return false;
+  return true;
+}
+
+function shouldShiftLegacyJointPosition(slotId: string, uIndex: number) {
+  const stageNumber = Number(slotId.match(/^joint-stage-(\d+)$/)?.[1]);
+  if (!Number.isFinite(stageNumber)) return false;
+  if (stageNumber === 2) return uIndex >= 5;
+  if (stageNumber > 2 && stageNumber < 35) return true;
+  return stageNumber === 35 && uIndex === 1;
+}
+
+function getDefaultJointStageWeight(name: string, uCount: number) {
+  return /^炉[123]$/.test(name) ? 1 : Math.max(1, uCount);
+}
+
 const DEFAULT_JOINT_STAGE_WEIGHT = DEFAULT_JOINT_STAGE_DEFINITIONS.reduce(
-  (sum, [, uCount]) => sum + Math.max(1, uCount),
+  (sum, [name, uCount]) => sum + getDefaultJointStageWeight(name, uCount),
   0,
 );
 
@@ -660,45 +729,46 @@ const DEFAULT_JOINT_SLOTS: JointSlotConfig[] = DEFAULT_JOINT_STAGE_DEFINITIONS.m
   ([name, uCount], index) => ({
     id: `joint-stage-${String(index + 1).padStart(2, "0")}`,
     name,
-    length: Number(((240 * Math.max(1, uCount)) / DEFAULT_JOINT_STAGE_WEIGHT).toFixed(4)),
+    length: Number(((240 * getDefaultJointStageWeight(name, uCount)) / DEFAULT_JOINT_STAGE_WEIGHT).toFixed(4)),
     uCount,
   }),
 );
 
 // 生产线实测默认位置，车速 1.34 m/min；键格式为“阶段ID:U序号”，无 U 阶段使用 0。
 const DEFAULT_JOINT_CALIBRATION_POSITIONS: Record<string, number> = {
-  "joint-stage-02:5": 42.5,
-  "joint-stage-04:2": 50.6,
-  "joint-stage-05:1": 54.5,
-  "joint-stage-06:1": 55.4,
-  "joint-stage-06:2": 59.5,
-  "joint-stage-07:1": 63.5,
-  "joint-stage-08:1": 66.0,
-  "joint-stage-09:1": 70.2,
-  "joint-stage-10:1": 73.1,
-  "joint-stage-10:2": 77.4,
-  "joint-stage-11:1": 81.3,
-  "joint-stage-12:1": 84.3,
-  "joint-stage-13:1": 88.2,
-  "joint-stage-14:1": 91.3,
-  "joint-stage-14:2": 95.2,
-  "joint-stage-14:3": 98.8,
-  "joint-stage-15:1": 102.5,
-  "joint-stage-25:1": 179.7,
-  "joint-stage-26:1": 182.5,
-  "joint-stage-26:2": 186.6,
-  "joint-stage-26:3": 190.2,
-  "joint-stage-27:1": 193.7,
-  "joint-stage-27:2": 196.3,
-  "joint-stage-28:1": 199.2,
-  "joint-stage-28:2": 203.6,
-  "joint-stage-31:1": 213.6,
-  "joint-stage-31:2": 217.6,
-  "joint-stage-32:1": 224.3,
-  "joint-stage-33:1": 228.1,
-  "joint-stage-34:1": 228.8,
-  "joint-stage-34:2": 231.6,
-  "joint-stage-35:0": 234.1,
+  "joint-stage-02:5": 40.5,
+  "joint-stage-04:2": 48.6,
+  "joint-stage-05:1": 52.5,
+  "joint-stage-06:1": 53.4,
+  "joint-stage-06:2": 57.5,
+  "joint-stage-07:1": 61.5,
+  "joint-stage-08:1": 64.0,
+  "joint-stage-09:1": 68.2,
+  "joint-stage-10:1": 71.1,
+  "joint-stage-10:2": 75.4,
+  "joint-stage-11:1": 79.3,
+  "joint-stage-12:1": 82.3,
+  "joint-stage-13:1": 86.2,
+  "joint-stage-14:1": 89.3,
+  "joint-stage-14:2": 93.2,
+  "joint-stage-14:3": 96.8,
+  "joint-stage-15:1": 100.5,
+  "joint-stage-25:1": 177.7,
+  "joint-stage-26:1": 180.5,
+  "joint-stage-26:2": 184.6,
+  "joint-stage-26:3": 188.2,
+  "joint-stage-27:1": 191.7,
+  "joint-stage-27:2": 194.3,
+  "joint-stage-28:1": 197.2,
+  "joint-stage-28:2": 201.6,
+  "joint-stage-31:1": 211.6,
+  "joint-stage-31:2": 215.6,
+  "joint-stage-32:1": 222.3,
+  "joint-stage-33:1": 226.1,
+  "joint-stage-34:1": 226.8,
+  "joint-stage-34:2": 229.6,
+  "joint-stage-35:1": 232.1,
+  "joint-stage-35:2": 234.1,
 };
 
 const LEGACY_JOINT_SLOT_NAMES = [
@@ -725,14 +795,15 @@ function normalizeJointSlots(raw?: JointSlotConfig[]) {
   return source.map((slot, index) => {
     const rawUCount = Number(slot.uCount);
     const fallbackUCount = DEFAULT_JOINT_SLOTS[index]?.uCount ?? 1;
+    const normalizedUCount = Math.max(
+      0,
+      Math.round(Number.isFinite(rawUCount) ? rawUCount : fallbackUCount),
+    );
     return {
       id: slot.id || `slot-${index + 1}`,
       name: String(slot.name || `槽${index + 1}`),
       length: Math.max(1, Number(slot.length) || DEFAULT_JOINT_SLOTS[index]?.length || 10),
-      uCount: Math.max(
-        0,
-        Math.round(Number.isFinite(rawUCount) ? rawUCount : fallbackUCount),
-      ),
+      uCount: isFurnaceJointSlot(slot) ? Math.max(2, normalizedUCount) : normalizedUCount,
     };
   });
 }
@@ -1050,6 +1121,35 @@ function distanceBetweenWithSpeed(
   return distance;
 }
 
+function getPlannedLiveMeterValue(
+  config: LinePlanConfig,
+  planStart: Date,
+  now = new Date(),
+) {
+  const carryIn = getFirstRollCarryIn(config);
+  const hasPlanningData =
+    config.rolls.length > 0 || carryIn > 0 || getPlannedCorrosionDemand(config) > 0;
+  if (!hasPlanningData) return null;
+  if (now.getTime() <= planStart.getTime()) return carryIn;
+
+  let distance = distanceBetweenWithSpeed(planStart, now, config, planStart);
+  if (config.rolls.length === 0) return carryIn + distance;
+
+  for (let index = 0; index < config.rolls.length; index += 1) {
+    const rollDistance = Math.max(
+      0,
+      getRollCorrosionConsumed(config.rolls[index], index, config),
+    );
+    if (distance < rollDistance) {
+      return (index === 0 ? carryIn : 0) + distance;
+    }
+    distance = Math.max(0, distance - rollDistance);
+    if (distance < 0.0001) return 0;
+  }
+
+  return distance;
+}
+
 function subtractDistanceWithSpeed(
   endTime: Date,
   distance: number,
@@ -1078,6 +1178,18 @@ function subtractDistanceWithSpeed(
     cursor = new Date(stop);
   }
   return addMinutes(cursor, -(remaining / Math.max(0.01, Number(config.speed) || 1)));
+}
+
+function addSignedDistanceWithSpeed(
+  startTime: Date,
+  distance: number,
+  config: LinePlanConfig,
+  shiftStart = getCurrentShiftStart(startTime),
+) {
+  if (!Number.isFinite(distance) || distance === 0) return new Date(startTime);
+  return distance > 0
+    ? addDistanceWithSpeed(startTime, distance, config, shiftStart)
+    : subtractDistanceWithSpeed(startTime, Math.abs(distance), config, shiftStart);
 }
 
 function TaskCountdownCard({
@@ -1140,7 +1252,7 @@ function TaskCountdownCard({
           const jointPrepHandled = activeSplicing.some(
             (task) => task.line === lineId && task.sourceRollId === roll.id,
           );
-          const frontStartTime = addDistanceWithSpeed(currentTime, Math.max(0, accC - 240), config, currentTime);
+          const frontStartTime = addSignedDistanceWithSpeed(currentTime, accC - 240, config, currentTime);
           if (!jointPrepHandled && frontStartTime.getTime() >= nowTime.getTime()) {
             candidates.push({
               id: `joint-${lineId}-${roll.id}`,
@@ -2121,7 +2233,7 @@ function DraggableTimelineLine({
         let frontStartLeftPct = 0;
         let frontStartTime = new Date();
         if (isJoint) {
-          const frontStartTimeForNode = addDistanceWithSpeed(currentTime, Math.max(0, h - getFirstRollCarryIn(config) - 240), config, shiftStart);
+          const frontStartTimeForNode = addSignedDistanceWithSpeed(currentTime, h - getFirstRollCarryIn(config) - 240, config, shiftStart);
           const frontStartFromShiftStart = differenceInMinutes(frontStartTimeForNode, shiftStart);
           frontStartLeftPct = (frontStartFromShiftStart / maxMinutes) * 100;
           frontStartTime = frontStartTimeForNode;
@@ -2129,7 +2241,7 @@ function DraggableTimelineLine({
 
         return (
           <React.Fragment key={"handle-" + i}>
-            {isJoint && frontStartLeftPct >= -10 && (
+            {isJoint && frontStartLeftPct >= 0 && frontStartLeftPct <= 100 && (
               <div
                 className="absolute top-0 bottom-0 w-px bg-yellow-400 z-10 pointer-events-none"
                 style={{ left: `${frontStartLeftPct}%` }}
@@ -3295,14 +3407,18 @@ export default function App() {
 
   const markJointUPosition = (lineId: LineId, jointId: string, slotId: string, uIndex: number) => {
     const joint = getJointTrackingForLine(lineId).find((item) => item.id === jointId);
-    if (!joint) return;
+    const targetPoint = getCalibratedUPointsForLine(lineId).find(
+      (point) => point.slot.id === slotId && point.uIndex === uIndex,
+    );
+    if (!joint || !targetPoint) return;
     const nextMark: JointCalibrationMark = {
       id: `${slotId}:${uIndex}`,
       slotId,
       uIndex,
-      position: Number(joint.clampedDistance.toFixed(2)),
+      position: Number(targetPoint.position.toFixed(2)),
       markedAt: currentTime.toISOString(),
       jointId,
+      positionRevision: JOINT_POSITION_DATA_REVISION,
     };
     setJointCalibrationMarks((prev) => ({
       ...prev,
@@ -3620,7 +3736,7 @@ export default function App() {
       };
     });
 
-    return seeded.map((point, index) => {
+    const positionedPoints = seeded.map((point, index) => {
       if (point.measuredPosition !== null) {
         return {
           ...point,
@@ -3648,6 +3764,25 @@ export default function App() {
         calibrated: false,
         fromDefault: false,
       };
+    });
+
+    return positionedPoints.map((point) => {
+      if (
+        isFurnaceJointSlot(point.slot) &&
+        point.uIndex === 2 &&
+        point.measuredPosition === null
+      ) {
+        const furnaceFront = positionedPoints.find(
+          (candidate) => candidate.slot.id === point.slot.id && candidate.uIndex === 1,
+        );
+        if (furnaceFront) {
+          return {
+            ...point,
+            position: Math.min(240, furnaceFront.position + 2),
+          };
+        }
+      }
+      return point;
     }).sort((a, b) => a.position - b.position);
   };
 
@@ -3674,6 +3809,7 @@ export default function App() {
 
   const getJointTrackingForLine = (lineId: LineId) => {
     const config = lineConfigs[lineId];
+    const lineMarks = jointCalibrationMarks[lineId] || [];
     let accC = 0;
 
     return config.rolls
@@ -3682,14 +3818,60 @@ export default function App() {
         accC += consumed;
         if (!roll.isJoint) return null;
 
-        const exitTime = addDistanceWithSpeed(scheduleTime, accC, config, scheduleTime);
-        const startTime = addDistanceWithSpeed(scheduleTime, Math.max(0, accC - 240), config, scheduleTime);
+        const plannedExitTime = addDistanceWithSpeed(scheduleTime, accC, config, scheduleTime);
+        const plannedStartTime = addSignedDistanceWithSpeed(scheduleTime, accC - 240, config, scheduleTime);
+        const plannedDistance = distanceBetweenWithSpeed(
+          plannedStartTime,
+          currentTime,
+          config,
+          scheduleTime,
+        );
+        const trackingAnchor = lineMarks
+          .filter((mark) => {
+            if (mark.jointId !== roll.id) return false;
+            const markedAt = new Date(mark.markedAt);
+            return (
+              Number.isFinite(Number(mark.position)) &&
+              !Number.isNaN(markedAt.getTime()) &&
+              markedAt.getTime() <= currentTime.getTime()
+            );
+          })
+          .sort(
+            (a, b) => new Date(b.markedAt).getTime() - new Date(a.markedAt).getTime(),
+          )[0];
+        const anchorTime = trackingAnchor ? new Date(trackingAnchor.markedAt) : null;
+        const anchorPosition = trackingAnchor
+          ? Math.max(0, Math.min(240, Number(trackingAnchor.position)))
+          : null;
+        const distance = anchorTime !== null && anchorPosition !== null
+          ? anchorPosition + distanceBetweenWithSpeed(
+              anchorTime,
+              currentTime,
+              config,
+              scheduleTime,
+            )
+          : plannedDistance;
+        const startTime = anchorTime !== null && anchorPosition !== null
+          ? subtractDistanceWithSpeed(
+              anchorTime,
+              anchorPosition,
+              config,
+              scheduleTime,
+            )
+          : plannedStartTime;
+        const exitTime = anchorTime !== null && anchorPosition !== null
+          ? addDistanceWithSpeed(
+              anchorTime,
+              Math.max(0, 240 - anchorPosition),
+              config,
+              scheduleTime,
+            )
+          : plannedExitTime;
         const endTime = exitTime;
-        const distance = distanceBetweenWithSpeed(startTime, currentTime, config, scheduleTime);
         const clampedDistance = Math.max(0, Math.min(240, distance));
         const calibratedLocation = getCalibratedLocationForLine(lineId, clampedDistance);
         const status =
-          currentTime.getTime() < startTime.getTime()
+          !trackingAnchor && currentTime.getTime() < plannedStartTime.getTime()
             ? "未进入"
             : distance > 240
               ? "已出线"
@@ -3710,6 +3892,11 @@ export default function App() {
           inSlotDistance: Math.abs(calibratedLocation?.offsetToU || 0),
           totalSlotLength: 240,
           progress: (clampedDistance / 240) * 100,
+          trackingCorrected: Boolean(trackingAnchor),
+          correctedAt: anchorTime,
+          correctionOffset: trackingAnchor ? distance - plannedDistance : 0,
+          anchorSlotId: trackingAnchor?.slotId,
+          anchorUIndex: trackingAnchor?.uIndex,
         };
       })
       .filter(Boolean)
@@ -3733,6 +3920,11 @@ export default function App() {
         inSlotDistance: number;
         totalSlotLength: number;
         progress: number;
+        trackingCorrected: boolean;
+        correctedAt: Date | null;
+        correctionOffset: number;
+        anchorSlotId?: string;
+        anchorUIndex?: number;
       }>;
   };
 
@@ -4125,17 +4317,6 @@ export default function App() {
               <LayoutDashboard size={16} /> 工作台指引
             </button>
             <button
-              onClick={() => { setActivePage("line_meters"); setIsMobileMenuOpen(false); }}
-              className={cn(
-                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
-                activePage === "line_meters"
-                  ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
-                  : "hover:bg-slate-800 text-slate-300 hover:text-white",
-              )}
-            >
-              <Gauge size={16} /> 实时米数
-            </button>
-            <button
               onClick={() => { setActivePage("plan"); setIsMobileMenuOpen(false); }}
               className={cn(
                 "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
@@ -4191,6 +4372,17 @@ export default function App() {
               )}
             >
               <Settings2 size={16} /> 设置
+            </button>
+            <button
+              onClick={() => { setActivePage("line_meters"); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-[13px] font-semibold transition-all",
+                activePage === "line_meters"
+                  ? "bg-blue-600/10 text-blue-400 shadow-sm ring-1 ring-blue-500/20"
+                  : "hover:bg-slate-800 text-slate-300 hover:text-white",
+              )}
+            >
+              <Gauge size={16} /> 实时米数
             </button>
             <button
               onClick={() => { setActivePage("joint_tracking"); setIsMobileMenuOpen(false); }}
@@ -4320,7 +4512,7 @@ export default function App() {
             )}
 
             {/* Header Bar */}
-            <header className="flex flex-wrap items-center justify-between mb-6 md:mb-8 shrink-0 gap-4">
+            <header className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-4">
               <div className="flex items-center gap-4">
                 <button 
                   onClick={() => setIsMobileMenuOpen(true)}
@@ -4330,11 +4522,102 @@ export default function App() {
                 </button>
                 <div>
                   <h2 className="text-xl md:text-2xl font-black tracking-tight text-slate-900">
-                    执行看版
+                    执行看板
                   </h2>
                 </div>
               </div>
             </header>
+
+            <div className="mb-2 grid shrink-0 grid-cols-3 overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm">
+              {activeLines.map((lineId, index) => {
+                const reading = lineMeterReadings[lineId] || {
+                  value: null,
+                  speed: null,
+                  updatedAt: null,
+                };
+                const comparisonTime = new Date();
+                const actualValue = getLiveLineMeterValue(reading, comparisonTime);
+                const plannedValue = getPlannedLiveMeterValue(
+                  lineConfigs[lineId],
+                  scheduleTime,
+                  comparisonTime,
+                );
+                const deviation = actualValue !== null && plannedValue !== null
+                  ? actualValue - plannedValue
+                  : null;
+                const hasLargeDeviation = deviation !== null && Math.abs(deviation) > 3;
+                return (
+                  <button
+                    key={lineId}
+                    type="button"
+                    onClick={() => setActivePage("line_meters")}
+                    className={cn(
+                      "flex min-w-0 items-baseline justify-center gap-1 px-1 py-1.5 transition-colors",
+                      hasLargeDeviation
+                        ? "bg-red-50 text-red-700 hover:bg-red-100"
+                        : "text-slate-600 hover:bg-slate-50",
+                      index < activeLines.length - 1 && (hasLargeDeviation ? "border-r border-red-200" : "border-r border-slate-200"),
+                    )}
+                    title={
+                      deviation === null
+                        ? `${lineId}号线实际米数`
+                        : `${lineId}号线规划 ${plannedValue?.toFixed(2)}m，偏差 ${deviation >= 0 ? "+" : ""}${deviation.toFixed(2)}m`
+                    }
+                  >
+                    <span className={cn("shrink-0 text-[10px] font-black", hasLargeDeviation ? "text-red-600" : "text-slate-500")}>
+                      {lineId}#
+                    </span>
+                    <span className={cn("truncate font-mono text-xs font-black", hasLargeDeviation ? "text-red-700" : "text-slate-900")}>
+                      {actualValue === null ? "--" : actualValue.toFixed(1)}
+                    </span>
+                    <span className={cn("shrink-0 text-[9px] font-bold", hasLargeDeviation ? "text-red-500" : "text-slate-400")}>
+                      m
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {(() => {
+              const trackingJoints = activeLines.flatMap((lineId) => {
+                const joint = getJointTrackingForLine(lineId).find(
+                  (item) => item.status === "追踪中",
+                );
+                return joint ? [joint] : [];
+              });
+              if (trackingJoints.length === 0) return null;
+
+              return (
+                <div className="mb-4 flex shrink-0 gap-1.5">
+                  {trackingJoints.map((joint) => {
+                    const locationLabel = joint.currentSlot
+                      ? `${joint.currentSlot.name}${joint.currentU > 0 ? ` · ${getJointPointLabel(joint.currentSlot, joint.currentU)}` : ""}`
+                      : "位置待确认";
+                    return (
+                      <button
+                        key={`${joint.lineId}-${joint.id}`}
+                        type="button"
+                        onClick={() => {
+                          setSelectedLine(joint.lineId);
+                          setActivePage("joint_tracking");
+                        }}
+                        className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-orange-200 bg-orange-50 px-2 py-2 text-left text-orange-900 shadow-sm transition-colors hover:bg-orange-100"
+                        title={`${joint.lineId}号线当前接头：${locationLabel}，${joint.clampedDistance.toFixed(1)}米`}
+                      >
+                        <MapPin size={13} className="shrink-0 text-orange-600" />
+                        <span className="shrink-0 text-[10px] font-black">{joint.lineId}#</span>
+                        <span className="min-w-0 flex-1 truncate text-[10px] font-black">
+                          {locationLabel}
+                        </span>
+                        <span className="shrink-0 font-mono text-[10px] font-black text-orange-700">
+                          {joint.clampedDistance.toFixed(1)}m
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })()}
 
             <div className="flex flex-col lg:max-w-4xl mx-auto w-full gap-6 flex-1 min-h-0 overflow-y-auto xl:overflow-hidden pb-20 md:pb-0">
               {/* Timeline Context (Left Column) */}
@@ -4384,9 +4667,9 @@ export default function App() {
                           const t = r.endTime;
                           let frontStartTime: Date | undefined;
                           if (r.isJoint) {
-                            frontStartTime = addDistanceWithSpeed(
+                            frontStartTime = addSignedDistanceWithSpeed(
                               scheduleTime,
-                              Math.max(0, r.cumulativeCorrosion - 240),
+                              r.cumulativeCorrosion - 240,
                               lineConfigs[lineId],
                               scheduleTime,
                             );
@@ -5671,7 +5954,17 @@ export default function App() {
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
                 {activeLines.map((lineId, index) => {
                   const reading = lineMeterReadings[lineId] || { value: null, speed: null, updatedAt: null };
-                  const liveValue = getLiveLineMeterValue(reading, new Date());
+                  const comparisonTime = new Date();
+                  const liveValue = getLiveLineMeterValue(reading, comparisonTime);
+                  const plannedValue = getPlannedLiveMeterValue(
+                    lineConfigs[lineId],
+                    scheduleTime,
+                    comparisonTime,
+                  );
+                  const deviation = liveValue !== null && plannedValue !== null
+                    ? liveValue - plannedValue
+                    : null;
+                  const hasLargeDeviation = deviation !== null && Math.abs(deviation) > 3;
                   const updatedDate = reading.updatedAt ? new Date(reading.updatedAt) : null;
                   const hasValidDate = updatedDate && !Number.isNaN(updatedDate.getTime());
                   return (
@@ -5719,6 +6012,32 @@ export default function App() {
                             {reading.speed.toFixed(2)} m/min
                           </span>
                         )}
+                      </div>
+
+                      <div
+                        className={cn(
+                          "mt-4 grid grid-cols-2 gap-2 rounded-lg border px-3 py-2.5 text-xs font-black",
+                          hasLargeDeviation
+                            ? "border-red-200 bg-red-50 text-red-700"
+                            : "border-slate-200 bg-slate-50 text-slate-600",
+                        )}
+                      >
+                        <div className="min-w-0">
+                          <div className="text-[10px] text-slate-400">规划预估米数</div>
+                          <div className="mt-0.5 truncate font-mono text-sm">
+                            {plannedValue === null ? "--" : `${plannedValue.toFixed(2)}m`}
+                          </div>
+                        </div>
+                        <div className="min-w-0 border-l border-current/15 pl-3">
+                          <div className={cn("text-[10px]", hasLargeDeviation ? "text-red-500" : "text-slate-400")}>
+                            实际偏差
+                          </div>
+                          <div className="mt-0.5 truncate font-mono text-sm">
+                            {deviation === null
+                              ? "--"
+                              : `${deviation >= 0 ? "+" : ""}${deviation.toFixed(2)}m`}
+                          </div>
+                        </div>
                       </div>
 
                       <form
@@ -5834,7 +6153,7 @@ export default function App() {
                 <div>
                   <h2 className="text-xl sm:text-2xl font-black">接头动态追踪</h2>
                   <p className="text-xs sm:text-sm font-bold text-slate-400 mt-1">
-                    通过手动标记接头到达的槽/U，反推真实位置，再预测未来每分钟位置。
+                    从前处理槽 U4/U5 开始手动校正接头位置，再预测未来每分钟位置。
                   </p>
                 </div>
               </div>
@@ -5859,7 +6178,19 @@ export default function App() {
 
             {(() => {
               const joints = getJointTrackingForLine(selectedLine);
-              const activeJoint = joints.find((joint) => joint.status === "追踪中") || joints[0];
+              const trackingJoint = joints.find((joint) => joint.status === "追踪中");
+              const activeJoint = trackingJoint || [...joints].sort((a, b) => {
+                const distanceToNow = (joint: typeof a) => {
+                  if (currentTime.getTime() < joint.startTime.getTime()) {
+                    return joint.startTime.getTime() - currentTime.getTime();
+                  }
+                  if (currentTime.getTime() > joint.exitTime.getTime()) {
+                    return currentTime.getTime() - joint.exitTime.getTime();
+                  }
+                  return 0;
+                };
+                return distanceToNow(a) - distanceToNow(b);
+              })[0];
               const calibratedPoints = getCalibratedUPointsForLine(selectedLine);
               const measuredCount = calibratedPoints.filter(
                 (point) => point.calibrated || point.fromDefault,
@@ -5881,7 +6212,7 @@ export default function App() {
                         <div>
                           <h3 className="text-sm font-black text-slate-100">当前接头</h3>
                           <p className="text-[11px] font-bold text-slate-500 mt-1">
-                            标记按钮会使用当前接头位置作为该 U 的真实米数。
+                            标记到达后，接头会从所选槽/U的真实位置继续跟踪。
                           </p>
                         </div>
                         <div className="rounded-xl bg-slate-950 border border-slate-800 px-3 py-2 text-right">
@@ -5903,12 +6234,20 @@ export default function App() {
                               </div>
                               <div className="mt-1 text-2xl font-black text-white">
                                 {activeJoint.status === "追踪中"
-                                  ? `${activeJoint.currentSlot?.name || "未知阶段"}${activeJoint.currentU > 0 ? ` · U${activeJoint.currentU}` : ""}`
+                                  ? `${activeJoint.currentSlot?.name || "未知阶段"}${activeJoint.currentSlot && activeJoint.currentU > 0 ? ` · ${getJointPointLabel(activeJoint.currentSlot, activeJoint.currentU)}` : ""}`
                                   : activeJoint.status}
                               </div>
                               <div className="mt-1 text-[11px] font-bold text-slate-400">
                                 进入 {format(activeJoint.startTime, "HH:mm")} · 出线 {format(activeJoint.exitTime, "HH:mm")} · 当前车速 {getSpeedAtTime(lineConfigs[selectedLine], currentTime, scheduleTime).toFixed(2)} m/min
                               </div>
+                              {activeJoint.trackingCorrected && activeJoint.correctedAt && (
+                                <div className="mt-2 inline-flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 text-[10px] font-black text-emerald-300">
+                                  <span>已手动校正 {format(activeJoint.correctedAt, "HH:mm:ss")}</span>
+                                  <span className="font-mono">
+                                    对原预估 {activeJoint.correctionOffset >= 0 ? "+" : ""}{activeJoint.correctionOffset.toFixed(1)}m
+                                  </span>
+                                </div>
+                              )}
                             </div>
                             <div className="rounded-xl bg-emerald-500/10 text-emerald-300 px-3 py-2 text-right font-mono">
                               <div className="text-2xl font-black">{activeJoint.clampedDistance.toFixed(1)}m</div>
@@ -5937,9 +6276,9 @@ export default function App() {
                     <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:p-5">
                       <div className="sticky top-0 z-20 -mx-2 mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900/95 px-2 py-3 backdrop-blur">
                         <div>
-                          <h3 className="text-sm font-black text-slate-100">槽和 U 标定</h3>
+                          <h3 className="text-sm font-black text-slate-100">槽和 U 到达定位</h3>
                           <p className="text-[11px] font-bold text-slate-500 mt-1">
-                            接头实际走到某个 U 或无 U 阶段时，点“标记到达”记录真实位置。
+                            对接槽至前处理 U3 无需打点，从 U4/U5 开始；系统误判状态时仍可校正。
                           </p>
                         </div>
                         <div className="flex gap-2">
@@ -5956,7 +6295,7 @@ export default function App() {
                             onClick={() => setJointCalibrationMarks((prev) => ({ ...prev, [selectedLine]: [] }))}
                             className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-[10px] font-black text-slate-300 hover:bg-slate-800"
                           >
-                            清除手动标定
+                            清除手动校正
                           </button>
                         </div>
                       </div>
@@ -5976,7 +6315,11 @@ export default function App() {
                             <div className="flex items-center justify-between gap-3 mb-3">
                               <div className="font-black text-sm text-slate-200">{slot.name}</div>
                               <div className="text-[10px] font-bold text-slate-500">
-                                {slot.uCount > 0 ? `${slot.uCount} 个 U` : "无 U"}
+                                {isFurnaceJointSlot(slot)
+                                  ? "炉前 / 炉后"
+                                  : slot.uCount > 0
+                                    ? `${slot.uCount} 个 U`
+                                    : "无 U"}
                               </div>
                             </div>
                             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
@@ -5987,6 +6330,8 @@ export default function App() {
                                   activeJoint?.status === "追踪中" &&
                                   activeJoint.currentSlot?.id === slot.id &&
                                   activeJoint.currentU === uIndex;
+                                const isTrackingStartPoint = isInitialJointTrackingPoint(slot, uIndex);
+                                const canMarkPoint = canMarkJointTrackingPoint(slot, uIndex);
                                 return (
                                   <div
                                     key={`${slot.id}-${uIndex}`}
@@ -5998,9 +6343,16 @@ export default function App() {
                                     )}
                                   >
                                     <div className="flex items-center justify-between gap-2">
-                                      <span className="text-xs font-black text-slate-200">
-                                        {uIndex > 0 ? `U${uIndex}` : "阶段定位点"}
-                                      </span>
+                                      <div className="flex min-w-0 items-center gap-1">
+                                        <span className="text-xs font-black text-slate-200">
+                                          {getJointPointLabel(slot, uIndex)}
+                                        </span>
+                                        {isTrackingStartPoint && (
+                                          <span className="rounded bg-blue-500/15 px-1 py-0.5 text-[8px] font-black text-blue-300">
+                                            起始
+                                          </span>
+                                        )}
+                                      </div>
                                       <span className={cn(
                                         "text-[10px] font-mono font-black",
                                         point?.calibrated || point?.fromDefault
@@ -6013,11 +6365,11 @@ export default function App() {
                                     <div className="mt-2 grid grid-cols-2 gap-1">
                                       <button
                                         type="button"
-                                        disabled={!activeJoint || activeJoint.status !== "追踪中"}
+                                        disabled={!activeJoint || !canMarkPoint}
                                         onClick={() => activeJoint && markJointUPosition(selectedLine, activeJoint.id, slot.id, uIndex)}
                                         className="rounded bg-orange-600 disabled:opacity-40 disabled:bg-slate-700 px-2 py-1.5 text-[10px] font-black text-white"
                                       >
-                                        标记到达
+                                        {canMarkPoint ? "标记到达" : "无需标记"}
                                       </button>
                                       <button
                                         type="button"
@@ -6070,7 +6422,7 @@ export default function App() {
                                     {isOut
                                       ? "已出生产线"
                                       : location
-                                        ? `${location.slot.name}${location.uIndex > 0 ? ` · U${location.uIndex}` : ""}`
+                                        ? `${location.slot.name}${location.uIndex > 0 ? ` · ${getJointPointLabel(location.slot, location.uIndex)}` : ""}`
                                         : "未知阶段"}
                                   </div>
                                   <div className="text-[10px] font-bold text-slate-500">
@@ -6092,7 +6444,7 @@ export default function App() {
                         <div>
                           <h3 className="text-sm font-black text-slate-100">槽名称和 U 数管理</h3>
                           <p className="text-[11px] font-bold text-slate-500 mt-1">
-                            这里管理结构；真实米数由上面的打点自动反推。
+                            这里管理结构；三个炉固定使用“炉前、炉后”两个定位点。
                           </p>
                         </div>
                         <button
@@ -6105,7 +6457,7 @@ export default function App() {
                       </div>
 
                       <div className="space-y-2">
-                        {(jointSlotConfigs[selectedLine] || []).map((slot, index) => (
+                        {normalizeJointSlots(jointSlotConfigs[selectedLine]).map((slot, index) => (
                           <div key={slot.id} className="grid grid-cols-[auto_minmax(0,1fr)_58px_auto] gap-2 items-end rounded-xl bg-slate-950/60 border border-slate-800 p-2">
                             <div className="pb-2 text-xs font-black text-slate-500">#{index + 1}</div>
                             <label>
@@ -6120,7 +6472,7 @@ export default function App() {
                               <span className="block text-[9px] text-slate-500 font-bold mb-1">U</span>
                               <input
                                 type="number"
-                                min="0"
+                                min={isFurnaceJointSlot(slot) ? 2 : 0}
                                 value={slot.uCount}
                                 onChange={(e) => updateJointSlot(selectedLine, slot.id, { uCount: Number(e.target.value) })}
                                 className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 font-mono outline-none focus:border-blue-400"
