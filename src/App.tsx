@@ -304,6 +304,12 @@ const LOCAL_RETENTION_DAYS = 14;
 const LOCAL_BACKUP_SUFFIX = "__backup";
 const MIN_MANUAL_FORMED_LENGTH = 1;
 
+function parsePositiveDecimalInput(value: string) {
+  const normalized = value.trim().replace(/[，。．]/g, ".");
+  const parsed = Number(normalized);
+  return normalized !== "" && Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 function readLocalStorageWithBackup(key: string) {
   const value = localStorage.getItem(key);
   if (value !== null) return value;
@@ -2724,6 +2730,8 @@ export default function App() {
   const [lineConfigs, setLineConfigs] = useState<
     Record<LineId, LinePlanConfig>
   >(() => createLineConfigMap(lineAssignments));
+  const [lineSpeedDrafts, setLineSpeedDrafts] = useState<Partial<Record<LineId, string>>>({});
+  const [segmentSpeedDrafts, setSegmentSpeedDrafts] = useState<Record<string, string>>({});
 
   // -- form states --
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -5314,18 +5322,32 @@ export default function App() {
                             </div>
                             <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] gap-2 items-center">
                               <input
-                                type="number"
+                                type="text"
+                                inputMode="decimal"
                                 step="0.01"
-                                value={lineConfigs[selectedLine].speed || ""}
-                                onChange={(e) =>
-                                  setLineConfigs((p) => ({
-                                    ...p,
-                                    [selectedLine]: {
-                                      ...p[selectedLine],
-                                      speed: Number(e.target.value),
-                                    },
-                                  }))
+                                value={lineSpeedDrafts[selectedLine] ?? String(lineConfigs[selectedLine].speed || "")}
+                                onChange={(e) => {
+                                  const nextValue = e.target.value;
+                                  const nextSpeed = parsePositiveDecimalInput(nextValue);
+                                  setLineSpeedDrafts((prev) => ({ ...prev, [selectedLine]: nextValue }));
+                                  if (nextSpeed !== null) {
+                                    setLineConfigs((p) => ({
+                                      ...p,
+                                      [selectedLine]: {
+                                        ...p[selectedLine],
+                                        speed: Number(nextSpeed.toFixed(3)),
+                                      },
+                                    }));
+                                  }
+                                }}
+                                onBlur={() =>
+                                  setLineSpeedDrafts((prev) => {
+                                    const next = { ...prev };
+                                    delete next[selectedLine];
+                                    return next;
+                                  })
                                 }
+                                onFocus={(event) => event.currentTarget.select()}
                                 className="min-w-0 bg-slate-900 border border-slate-700/60 rounded-lg px-3 py-2 text-xs text-white font-mono"
                               />
                               <span className="text-[10px] font-bold text-slate-500">班次开始默认</span>
@@ -5359,22 +5381,37 @@ export default function App() {
                                     />
                                     <div className="min-w-0 flex items-center gap-2">
                                       <input
-                                        type="number"
+                                        type="text"
+                                        inputMode="decimal"
                                         step="0.01"
-                                        value={segment.speed || ""}
-                                        onChange={(e) =>
-                                          setLineConfigs((p) => ({
-                                            ...p,
-                                            [selectedLine]: {
-                                              ...p[selectedLine],
-                                              speedSegments: (p[selectedLine].speedSegments || []).map((item) =>
-                                                item.id === segment.id
-                                                  ? { ...item, speed: Number(e.target.value) }
-                                                  : item,
-                                              ),
-                                            },
-                                          }))
+                                        value={segmentSpeedDrafts[`${selectedLine}:${segment.id}`] ?? String(segment.speed || "")}
+                                        onChange={(e) => {
+                                          const draftKey = `${selectedLine}:${segment.id}`;
+                                          const nextValue = e.target.value;
+                                          const nextSpeed = parsePositiveDecimalInput(nextValue);
+                                          setSegmentSpeedDrafts((prev) => ({ ...prev, [draftKey]: nextValue }));
+                                          if (nextSpeed !== null) {
+                                            setLineConfigs((p) => ({
+                                              ...p,
+                                              [selectedLine]: {
+                                                ...p[selectedLine],
+                                                speedSegments: (p[selectedLine].speedSegments || []).map((item) =>
+                                                  item.id === segment.id
+                                                    ? { ...item, speed: Number(nextSpeed.toFixed(3)) }
+                                                    : item,
+                                                ),
+                                              },
+                                            }));
+                                          }
+                                        }}
+                                        onBlur={() =>
+                                          setSegmentSpeedDrafts((prev) => {
+                                            const next = { ...prev };
+                                            delete next[`${selectedLine}:${segment.id}`];
+                                            return next;
+                                          })
                                         }
+                                        onFocus={(event) => event.currentTarget.select()}
                                         className="min-w-0 flex-1 bg-slate-950 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white font-mono"
                                       />
                                       <span className="hidden sm:inline text-[10px] font-bold text-slate-500 whitespace-nowrap">
