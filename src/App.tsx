@@ -6326,6 +6326,10 @@ export default function App() {
                               {Array.from({ length: Math.max(1, slot.uCount) }, (_, idx) => {
                                 const uIndex = slot.uCount > 0 ? idx + 1 : 0;
                                 const point = calibratedPoints.find((item) => item.slot.id === slot.id && item.uIndex === uIndex);
+                                const markedTime =
+                                  point?.markedAt && !Number.isNaN(new Date(point.markedAt).getTime())
+                                    ? new Date(point.markedAt)
+                                    : null;
                                 const isCurrentU =
                                   activeJoint?.status === "追踪中" &&
                                   activeJoint.currentSlot?.id === slot.id &&
@@ -6362,6 +6366,13 @@ export default function App() {
                                         {point ? point.position.toFixed(1) : "--"}m
                                       </span>
                                     </div>
+                                    {markedTime && (
+                                      <div className="mt-1 text-[9px] font-bold text-slate-500">
+                                        标记 {format(markedTime, "yyyy-MM-dd") === format(currentTime, "yyyy-MM-dd")
+                                          ? format(markedTime, "HH:mm:ss")
+                                          : format(markedTime, "MM-dd HH:mm:ss")}
+                                      </div>
+                                    )}
                                     <div className="mt-2 grid grid-cols-2 gap-1">
                                       <button
                                         type="button"
