@@ -3333,6 +3333,7 @@ export default function App() {
     fileName: string;
     content: string;
   } | null>(null);
+  const [backupCopyStatus, setBackupCopyStatus] = useState<"idle" | "success" | "manual" | "error">("idle");
   const [showBackupTextImport, setShowBackupTextImport] = useState(false);
   const [backupImportText, setBackupImportText] = useState("");
   const [rollCompletionInputs, setRollCompletionInputs] = useState<Record<LineId, string>>(() =>
@@ -3349,6 +3350,7 @@ export default function App() {
   });
   const localStateHydratedKeyRef = useRef<string | null>(null);
   const localBackupInputRef = useRef<HTMLInputElement | null>(null);
+  const backupExportTextRef = useRef<HTMLTextAreaElement | null>(null);
   const alarmIntervalRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
 
@@ -4733,6 +4735,7 @@ export default function App() {
     payload.key = snapshotKey;
     const serialized = JSON.stringify(payload, null, 2);
     const fileName = `maizhanpiao-backup-${format(new Date(), "yyyy-MM-dd-HHmm")}.json`;
+    setBackupCopyStatus("idle");
     setBackupExportDialog({ fileName, content: serialized });
     try {
       localStorage.setItem(snapshotKey, serialized);
@@ -4773,13 +4776,54 @@ export default function App() {
     }
   };
 
+  const selectAllBackupText = () => {
+    const textarea = backupExportTextRef.current;
+    if (!textarea) return;
+    const selectAll = () => {
+      textarea.focus();
+      textarea.select();
+      textarea.setSelectionRange(0, textarea.value.length);
+    };
+    selectAll();
+    window.requestAnimationFrame(selectAll);
+    window.setTimeout(selectAll, 80);
+  };
+
   const handleCopyBackupText = async () => {
     if (!backupExportDialog) return;
+    const text = backupExportDialog.content;
+    const markManualCopy = () => {
+      selectAllBackupText();
+      setBackupCopyStatus("manual");
+      setLocalBackupMessage("复制没有自动完成：已自动全选所有备份文字，请手动复制后粘贴保存。");
+    };
+
     try {
-      await navigator.clipboard.writeText(backupExportDialog.content);
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard API unavailable");
+      }
+      await navigator.clipboard.writeText(text);
+      const copied = await navigator.clipboard
+        .readText?.()
+        .then((value) => value === text)
+        .catch(() => true);
+      if (!copied) throw new Error("Clipboard verification failed");
+      setBackupCopyStatus("success");
       setLocalBackupMessage("备份文本已复制，可以粘贴到备忘录或微信文件助手保存。");
     } catch {
-      setLocalBackupMessage("复制失败：请长按文本框内容后手动全选复制。");
+      selectAllBackupText();
+      try {
+        const ok = document.execCommand("copy");
+        if (ok) {
+          setBackupCopyStatus("success");
+          setLocalBackupMessage("备份文本已复制，可以粘贴到备忘录或微信文件助手保存。");
+          return;
+        }
+        markManualCopy();
+      } catch {
+        setBackupCopyStatus("error");
+        markManualCopy();
+      }
     }
   };
 
@@ -7399,7 +7443,10 @@ export default function App() {
                 </p>
               </div>
               <button
-                onClick={() => setBackupExportDialog(null)}
+                onClick={() => {
+                  setBackupExportDialog(null);
+                  setBackupCopyStatus("idle");
+                }}
                 className="p-2 rounded-lg text-slate-500 hover:bg-slate-100"
                 type="button"
               >
@@ -7410,11 +7457,26 @@ export default function App() {
               {backupExportDialog.fileName}
             </div>
             <textarea
+              ref={backupExportTextRef}
               readOnly
               value={backupExportDialog.content}
               className="min-h-[220px] flex-1 w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-3 font-mono text-[11px] leading-relaxed text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-400"
               onFocus={(event) => event.currentTarget.select()}
             />
+            {backupCopyStatus !== "idle" && (
+              <div
+                className={cn(
+                  "mt-3 rounded-xl border px-3 py-2 text-xs font-black",
+                  backupCopyStatus === "success"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                    : "border-amber-200 bg-amber-50 text-amber-700",
+                )}
+              >
+                {backupCopyStatus === "success"
+                  ? "已复制成功，可以粘贴到备忘录、微信文件助手或文件里保存。"
+                  : "浏览器没有允许自动复制，已帮你选中文本，请用系统菜单手动复制。"}
+              </div>
+            )}
             <div className="mt-4 grid grid-cols-2 sm:grid-cols-5 gap-2">
               <button
                 onClick={handleSaveBackupToDevice}
@@ -7425,10 +7487,29 @@ export default function App() {
               </button>
               <button
                 onClick={handleCopyBackupText}
-                className="flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 px-3 py-2 text-xs font-black text-white hover:bg-blue-700"
+                className={cn(
+                  "flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-xs font-black text-white",
+                  backupCopyStatus === "success"
+                    ? "bg-emerald-600 hover:bg-emerald-700"
+                    : backupCopyStatus === "manual"
+                      ? "bg-amber-600 hover:bg-amber-700"
+                      : "bg-blue-600 hover:bg-blue-700",
+                )}
                 type="button"
               >
-                <Copy size={14} /> 复制文本
+                {backupCopyStatus === "success" ? (
+                  <>
+                    <CheckSquare size={14} /> 已复制
+                  </>
+                ) : backupCopyStatus === "manual" ? (
+                  <>
+                    <Copy size={14} /> 手动复制
+                  </>
+                ) : (
+                  <>
+                    <Copy size={14} /> 复制文本
+                  </>
+                )}
               </button>
               <button
                 onClick={handleShareBackup}
@@ -7445,7 +7526,10 @@ export default function App() {
                 <Download size={14} /> 普通下载
               </button>
               <button
-                onClick={() => setBackupExportDialog(null)}
+                onClick={() => {
+                  setBackupExportDialog(null);
+                  setBackupCopyStatus("idle");
+                }}
                 className="flex items-center justify-center rounded-xl bg-slate-100 px-3 py-2 text-xs font-black text-slate-700 hover:bg-slate-200"
                 type="button"
               >
