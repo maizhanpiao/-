@@ -208,10 +208,67 @@ export function getCurrentShiftEnd(time: Date) {
 
 // --- Shift Logic ---
 const ANCHOR_DATE_DAY1_YI = new Date("2026-04-28T00:00:00"); // 乙班 Day 1
+const ROSTER_SETTINGS_KEY = "maizhanpiao_roster_settings";
 
-function getShiftInfo(date: Date) {
-  const diffDays = differenceInDays(startOfDay(date), ANCHOR_DATE_DAY1_YI);
-  const cycleDay = ((diffDays % 6) + 6) % 6;
+export type ShiftCycleDay = 0 | 1 | 2 | 3 | 4 | 5;
+
+export interface RosterSettings {
+  anchorDate: string;
+  cycleDay: ShiftCycleDay;
+}
+
+const DEFAULT_ROSTER_SETTINGS: RosterSettings = {
+  anchorDate: format(ANCHOR_DATE_DAY1_YI, "yyyy-MM-dd"),
+  cycleDay: 0,
+};
+
+const SHIFT_CYCLE_LABELS = [
+  "白班第1天",
+  "白班第2天",
+  "夜班第1天",
+  "夜班第2天",
+  "休息第1天",
+  "休息第2天",
+] as const;
+
+function normalizeShiftCycleDay(value: unknown): ShiftCycleDay {
+  const numberValue = Number(value);
+  return [0, 1, 2, 3, 4, 5].includes(numberValue)
+    ? (numberValue as ShiftCycleDay)
+    : 0;
+}
+
+function loadRosterSettings(): RosterSettings {
+  if (typeof window === "undefined") return DEFAULT_ROSTER_SETTINGS;
+  try {
+    const raw = localStorage.getItem(ROSTER_SETTINGS_KEY);
+    if (!raw) return DEFAULT_ROSTER_SETTINGS;
+    const parsed = JSON.parse(raw);
+    const anchorDate =
+      typeof parsed?.anchorDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(parsed.anchorDate)
+        ? parsed.anchorDate
+        : DEFAULT_ROSTER_SETTINGS.anchorDate;
+    return {
+      anchorDate,
+      cycleDay: normalizeShiftCycleDay(parsed?.cycleDay),
+    };
+  } catch {
+    return DEFAULT_ROSTER_SETTINGS;
+  }
+}
+
+function saveRosterSettings(settings: RosterSettings) {
+  localStorage.setItem(ROSTER_SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function getRosterAnchorDate(settings = loadRosterSettings()) {
+  const parsed = new Date(`${settings.anchorDate}T00:00:00`);
+  return Number.isFinite(parsed.getTime()) ? parsed : ANCHOR_DATE_DAY1_YI;
+}
+
+function getShiftInfo(date: Date, settings = loadRosterSettings()) {
+  const diffDays = differenceInDays(startOfDay(date), getRosterAnchorDate(settings));
+  const cycleDay = ((diffDays + settings.cycleDay) % 6 + 6) % 6;
 
   // 0: 白班1, 1: 白班2, 2: 夜班1, 3: 夜班2, 4: 休息1, 5: 休息2
   let type: "Day" | "Night" | "Rest" = "Rest";
@@ -235,7 +292,21 @@ function getShiftInfo(date: Date) {
     timeStr = "全天休息";
   }
 
-  return { type, name, timeStr, cycleDay, startHour };
+  return {
+    type,
+    name,
+    timeStr,
+    cycleDay,
+    startHour,
+    rosterLabel: SHIFT_CYCLE_LABELS[cycleDay],
+  };
+}
+
+function getShiftOwnershipLabel(date: Date, settings?: RosterSettings) {
+  const info = getShiftInfo(date, settings);
+  if (info.type === "Day") return "我的白班";
+  if (info.type === "Night") return "我的夜班";
+  return "我的休息";
 }
 
 // --- Shift Logic for Punches ---
@@ -919,40 +990,24 @@ function getDefaultRangeStatus(lineId: LineId, length: number) {
   return "ok";
 }
 
-const CURRENT_SHIFT_TIMELINE_PCT = 64;
+const CURRENT_SHIFT_TIMELINE_PCT = 88;
 
 function getTimelineVisualPct(
   minuteFromStart: number,
-  shiftMinutes: number,
+  _shiftMinutes: number,
   timelineMinutes: number,
-  currentShiftPct = CURRENT_SHIFT_TIMELINE_PCT,
+  _currentShiftPct = CURRENT_SHIFT_TIMELINE_PCT,
 ) {
-  const safeShiftMinutes = Math.max(1, shiftMinutes);
-  const futureMinutes = Math.max(1, timelineMinutes - shiftMinutes);
-  if (minuteFromStart <= shiftMinutes) {
-    return (minuteFromStart / safeShiftMinutes) * currentShiftPct;
-  }
-  return (
-    currentShiftPct +
-    ((minuteFromStart - shiftMinutes) / futureMinutes) * (100 - currentShiftPct)
-  );
+  return (minuteFromStart / Math.max(1, timelineMinutes)) * 100;
 }
 
 function getTimelineMinuteFromPct(
   pct: number,
-  shiftMinutes: number,
+  _shiftMinutes: number,
   timelineMinutes: number,
-  currentShiftPct = CURRENT_SHIFT_TIMELINE_PCT,
+  _currentShiftPct = CURRENT_SHIFT_TIMELINE_PCT,
 ) {
-  const safeCurrentShiftPct = Math.max(1, currentShiftPct);
-  const futurePct = Math.max(1, 100 - currentShiftPct);
-  if (pct <= currentShiftPct) {
-    return (pct / safeCurrentShiftPct) * shiftMinutes;
-  }
-  return (
-    shiftMinutes +
-    ((pct - currentShiftPct) / futurePct) * (timelineMinutes - shiftMinutes)
-  );
+  return (pct / 100) * timelineMinutes;
 }
 
 function updateRollTargetWithBorrow(
@@ -1444,6 +1499,7 @@ function CombinedPlanTimeline({
   updateConfig,
   currentTime,
   nowTime,
+  rosterSettings,
   lines,
   activeSplicing,
   onStartRackCountdown,
@@ -1454,6 +1510,7 @@ function CombinedPlanTimeline({
   updateConfig: (id: LineId, c: LinePlanConfig) => void;
   currentTime: Date;
   nowTime: Date;
+  rosterSettings: RosterSettings;
   lines: LineId[];
   activeSplicing: SplicingTask[];
   onStartRackCountdown: (taskId: string) => void;
@@ -1465,7 +1522,13 @@ function CombinedPlanTimeline({
   const shiftEnd = getCurrentShiftEnd(currentTime);
   const shiftMinutes = differenceInMinutes(shiftEnd, shiftStart); // Typically 720
   const timelineMinutes = shiftMinutes * 2;
-  const shiftBoundaryPct = CURRENT_SHIFT_TIMELINE_PCT;
+  const shiftBoundaryPct = getTimelineVisualPct(
+    shiftMinutes,
+    shiftMinutes,
+    timelineMinutes,
+  );
+  const timelineWidthPct =
+    (CURRENT_SHIFT_TIMELINE_PCT / Math.max(1, shiftBoundaryPct)) * 100;
   const realNowMinutesFromShiftStart = differenceInMinutes(nowTime, shiftStart);
   const realNowPct = Math.max(
     0,
@@ -1492,7 +1555,10 @@ function CombinedPlanTimeline({
     <div className="mb-6 flex flex-col gap-6 w-full max-w-full">
       {/* The Unified Timeline Chart */}
       <div className="-mx-4 sm:mx-0 w-[calc(100%+32px)] sm:w-full overflow-x-auto hide-scrollbar sm:rounded-xl border-y sm:border border-slate-200 bg-slate-50 sm:shadow-inner relative z-0">
-        <div className="relative w-full text-slate-700 py-4 sm:py-6 pl-2 pr-2 sm:px-0">
+        <div
+          className="relative w-full text-slate-700 py-4 sm:py-6 pl-2 pr-2 sm:px-0"
+          style={{ width: `${timelineWidthPct}%`, minWidth: "680px" }}
+        >
           
           <div className="absolute top-0 bottom-0 left-4 right-4 pointer-events-none z-0">
             {/* Shift boundary ticks */}
@@ -1542,6 +1608,7 @@ function CombinedPlanTimeline({
                 if (index === shiftBoundaryTicks.length - 1) transform = "-translate-x-full";
 
                 const tickTime = addMinutes(shiftStart, minuteFromStart);
+                const tickShiftLabel = getShiftOwnershipLabel(tickTime, rosterSettings);
 
                 return (
                   <div
@@ -1549,7 +1616,12 @@ function CombinedPlanTimeline({
                     className={`absolute z-0 flex flex-col leading-none ${transform}`}
                     style={{ left: `${pct * 100}%` }}
                   >
-                    <span className="text-[9px] sm:text-[10px]">{format(tickTime, "MM-dd")}</span>
+                    <span className="text-[9px] sm:text-[10px]">
+                      {format(tickTime, "MM-dd")}
+                      <span className="ml-1 rounded bg-blue-50 px-1 py-0.5 text-[8px] font-black text-blue-600">
+                        {tickShiftLabel}
+                      </span>
+                    </span>
                     <span className="mt-0.5 text-[10px] sm:text-[11px] text-slate-500">
                       {format(tickTime, "HH:mm")}
                     </span>
@@ -2250,20 +2322,12 @@ function DraggableTimelineLine({
                   background:
                     "repeating-linear-gradient(135deg, rgba(251, 146, 60, 0.62) 0px, rgba(251, 146, 60, 0.62) 7px, rgba(248, 113, 113, 0.5) 7px, rgba(248, 113, 113, 0.5) 14px)",
                 }}
-              >
-                {pctWidth * (1 - jointAfterStartPct / 100) >= 7 && (
-                  <div className="absolute inset-y-0 left-1 flex items-center">
-                    <span className="rounded bg-orange-600/90 px-1 py-0.5 text-[8px] font-black leading-none text-white shadow-sm">
-                      接箔后
-                    </span>
-                  </div>
-                )}
-              </div>
+              />
             )}
 
             {/* Joint Marker at the end of the roll */}
             {roll.isJoint && (
-              <div className="absolute right-0 top-full mt-2 pointer-events-none flex flex-col items-center select-none" style={{ transform: "translateX(50%)" }}>
+              <div className="absolute right-0 top-full mt-7 pointer-events-none flex flex-col items-center select-none" style={{ transform: "translateX(50%)" }}>
                 <div className="w-px h-2 bg-orange-400"></div>
                 <div className="bg-orange-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap">
                   末端接头必分卷
@@ -2562,7 +2626,7 @@ function DraggableTimelineLine({
                 {isJoint && <Flag size={10} fill="currentColor" className="text-red-400" />}
                 {nodeTime.getDate() !== shiftStart.getDate() ? format(nodeTime, "MM-dd HH:mm") : format(nodeTime, "HH:mm")}
               </div>
-              <div className={cn("absolute top-[14px] border text-[9px] font-bold px-1.5 py-0.5 rounded pointer-events-none flex items-center gap-1 whitespace-nowrap shadow-sm",
+              <div className={cn("absolute top-full mt-1 border text-[9px] font-bold px-1.5 py-0.5 rounded pointer-events-none flex items-center gap-1 whitespace-nowrap shadow-sm",
                 isJoint ? "bg-orange-50/90 border-orange-200/50 text-orange-800" : "bg-blue-50/90 border-blue-200/50 text-blue-800"
               )}>
                 <span className="font-mono">{nodeTime.getDate() !== shiftStart.getDate() ? format(nodeTime, "MM-dd HH:mm") : format(nodeTime, "HH:mm")}</span>
@@ -3019,6 +3083,9 @@ export default function App() {
   const [timeOffset, setTimeOffset] = useState(0);
   const [isPlanningMode, setIsPlanningMode] = useState(true);
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [rosterSettings, setRosterSettings] = useState<RosterSettings>(() =>
+    loadRosterSettings(),
+  );
   const [showSimulator, setShowSimulator] = useState(false);
   const [simDateStr, setSimDateStr] = useState("");
   const [simTimeStr, setSimTimeStr] = useState("");
@@ -3026,14 +3093,23 @@ export default function App() {
   const [activePage, setActivePage] = useState<"dashboard" | "plan" | "admin" | "settings" | "daily_record" | "users" | "joint_tracking" | "line_meters">("dashboard");
 
   // -- Shift info --
-  const shiftInfo = getShiftInfo(currentTime);
+  const shiftInfo = getShiftInfo(currentTime, rosterSettings);
   const scheduleTime = isPlanningMode ? getPlanningShiftStart(currentTime) : currentTime;
+
+  const handleRosterSettingsChange = (settings: RosterSettings) => {
+    const normalized = {
+      anchorDate: settings.anchorDate || DEFAULT_ROSTER_SETTINGS.anchorDate,
+      cycleDay: normalizeShiftCycleDay(settings.cycleDay),
+    };
+    saveRosterSettings(normalized);
+    setRosterSettings(normalized);
+  };
 
   // If the user opens this on a rest day, provide a way to simulate a workday for the timeline
   const viewDate =
-    shiftInfo.type === "Rest" ? ANCHOR_DATE_DAY1_YI : startOfDay(currentTime);
+    shiftInfo.type === "Rest" ? getRosterAnchorDate(rosterSettings) : startOfDay(currentTime);
 
-  const viewShiftInfo = getShiftInfo(viewDate);
+  const viewShiftInfo = getShiftInfo(viewDate, rosterSettings);
 
   // -- punch state --
   const [punchRecords, setPunchRecords] = useState<
@@ -7102,7 +7178,21 @@ export default function App() {
                     分卷计划图表与编辑
                   </h2>
                   <div className="text-sm font-bold text-slate-500 mt-0.5">
-                    {format(getCurrentShiftStart(scheduleTime), "yyyy年MM月dd日")} · {getShiftInfo(getCurrentShiftStart(scheduleTime)).name} ({getShiftInfo(getCurrentShiftStart(scheduleTime)).timeStr})
+                    {(() => {
+                      const planShiftStart = getCurrentShiftStart(scheduleTime);
+                      const planShiftInfo = getShiftInfo(planShiftStart, rosterSettings);
+                      return (
+                        <>
+                          {format(planShiftStart, "yyyy年MM月dd日")}
+                          <span className="ml-2 rounded bg-blue-50 px-1.5 py-0.5 text-[11px] font-black text-blue-600">
+                            {getShiftOwnershipLabel(planShiftStart, rosterSettings)}
+                          </span>
+                          <span className="ml-1">
+                            · {planShiftInfo.name} ({planShiftInfo.timeStr})
+                          </span>
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>
               </div>
@@ -7120,6 +7210,7 @@ export default function App() {
                 }
                 currentTime={scheduleTime}
                 nowTime={currentTime}
+                rosterSettings={rosterSettings}
                 lines={activeLines}
                 activeSplicing={activeSplicing}
                 onStartRackCountdown={handleStartRackCountdown}
@@ -7159,6 +7250,9 @@ export default function App() {
             applySimulation={applySimulation}
             mealConfig={mealConfig}
             setMealConfig={setMealConfig}
+            rosterSettings={rosterSettings}
+            setRosterSettings={handleRosterSettingsChange}
+            shiftCycleLabels={SHIFT_CYCLE_LABELS}
           />
         ) : null}
       </main>

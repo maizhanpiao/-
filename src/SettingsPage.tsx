@@ -1,6 +1,6 @@
 import React from 'react';
-import { Scissors, CheckSquare, Droplets, Package, ChevronLeft, Clock, AlertCircle, Settings2 } from 'lucide-react';
-import { format, differenceInMinutes } from 'date-fns';
+import { Scissors, CheckSquare, Droplets, Package, ChevronLeft, Clock, AlertCircle, Settings2, CalendarDays } from 'lucide-react';
+import { format, differenceInMinutes, addDays } from 'date-fns';
 import { cn } from './lib/utils'; 
 
 export function SettingsPage({
@@ -8,8 +8,19 @@ export function SettingsPage({
   handleOpenSimulator, timeOffset, shiftInfo, handleTogglePlanningMode, 
   isPlanningMode, showSimulator, setShowSimulator, simDateStr, 
   setSimDateStr, simTimeStr, setSimTimeStr, resetSimulation, applySimulation,
-  mealConfig, setMealConfig
+  mealConfig, setMealConfig, rosterSettings, setRosterSettings, shiftCycleLabels
 }: any) {
+  const rosterAnchorDate = rosterSettings?.anchorDate
+    ? new Date(`${rosterSettings.anchorDate}T00:00:00`)
+    : currentTime;
+  const rosterCycleDay = Number(rosterSettings?.cycleDay || 0);
+  const previewDays = Array.from({ length: 6 }, (_, index) => {
+    const date = addDays(rosterAnchorDate, index);
+    const cycleIndex = (rosterCycleDay + index) % 6;
+    const label = shiftCycleLabels?.[cycleIndex] || "";
+    return { date, label };
+  });
+
   return (
     <div className="bg-slate-50 flex-1 overflow-auto p-4 sm:p-6 sm:rounded-3xl shadow-sm border border-slate-200">
       <div className="flex items-center justify-between mb-6">
@@ -41,7 +52,7 @@ export function SettingsPage({
                   const curLE = `${Math.floor(mealConfig.lunchEnd)}:${Math.floor((mealConfig.lunchEnd % 1) * 60).toString().padStart(2, "0")}`;
                   const curDS = `${Math.floor(mealConfig.dinnerStart)}:${Math.floor((mealConfig.dinnerStart % 1) * 60).toString().padStart(2, "0")}`;
                   const curDE = `${Math.floor(mealConfig.dinnerEnd)}:${Math.floor((mealConfig.dinnerEnd % 1) * 60).toString().padStart(2, "0")}`;
-                  const isNight = !!shiftInfo && shiftInfo.id.includes("Night");
+                  const isNight = shiftInfo?.type === "Night";
 
                   const curS = isNight ? curDS : curLS;
                   const curE = isNight ? curDE : curLE;
@@ -163,6 +174,84 @@ export function SettingsPage({
                   </div>
               </div>
             )}
+          </section>
+
+          <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <h3 className="font-bold flex items-center gap-2 text-slate-800">
+                <CalendarDays size={18} className="text-emerald-500" />
+                排班日期设置
+              </h3>
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-500">
+                两白两夜两休
+              </span>
+            </div>
+            <p className="text-sm text-slate-500 mb-4">
+              选一个你确认的日期，指定那天是白班、夜班还是休息，系统会按 6 天循环自动推算。
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-[1fr_1.2fr] gap-3">
+              <label>
+                <span className="block text-[10px] font-bold text-slate-500 uppercase mb-1">
+                  基准日期
+                </span>
+                <input
+                  type="date"
+                  value={rosterSettings?.anchorDate || ""}
+                  onChange={(event) =>
+                    setRosterSettings({
+                      ...rosterSettings,
+                      anchorDate: event.currentTarget.value,
+                    })
+                  }
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                />
+              </label>
+              <label>
+                <span className="block text-[10px] font-bold text-slate-500 uppercase mb-1">
+                  这一天的班次
+                </span>
+                <select
+                  value={String(rosterSettings?.cycleDay ?? 0)}
+                  onChange={(event) =>
+                    setRosterSettings({
+                      ...rosterSettings,
+                      cycleDay: Number(event.currentTarget.value),
+                    })
+                  }
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                >
+                  {(shiftCycleLabels || []).map((label: string, index: number) => (
+                    <option key={label} value={index}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              {previewDays.map((item) => (
+                <div
+                  key={format(item.date, "yyyy-MM-dd")}
+                  className={cn(
+                    "rounded-lg border px-2 py-2 text-center",
+                    item.label.includes("白班")
+                      ? "border-blue-100 bg-blue-50 text-blue-700"
+                      : item.label.includes("夜班")
+                        ? "border-indigo-100 bg-indigo-50 text-indigo-700"
+                        : "border-emerald-100 bg-emerald-50 text-emerald-700",
+                  )}
+                >
+                  <div className="text-[10px] font-black font-mono">
+                    {format(item.date, "MM-dd")}
+                  </div>
+                  <div className="mt-0.5 text-[11px] font-black">
+                    {item.label.replace("第", "").replace("天", "")}
+                  </div>
+                </div>
+              ))}
+            </div>
           </section>
         </div>
 
