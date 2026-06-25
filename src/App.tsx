@@ -360,10 +360,29 @@ interface LineMeterReading {
 }
 
 const DEFAULT_LINE_ASSIGNMENTS: AssignedLine[] = [
-  { id: "24", speed: 1.35 },
-  { id: "25", speed: 1.30 },
-  { id: "26", speed: 1.38 },
+  { id: "24", speed: 1.34 },
+  { id: "25", speed: 1.21 },
+  { id: "26", speed: 0.8 },
 ];
+
+const LEGACY_DEFAULT_LINE_SPEEDS: Record<string, number> = {
+  "24": 1.35,
+  "25": 1.3,
+  "26": 1.38,
+};
+
+function getDefaultLineSpeed(lineId: string, fallback = 1.3) {
+  return DEFAULT_LINE_ASSIGNMENTS.find((line) => line.id === lineId)?.speed ?? fallback;
+}
+
+function shouldUseNewDefaultLineSpeed(lineId: string, speed: number) {
+  const legacySpeed = LEGACY_DEFAULT_LINE_SPEEDS[lineId];
+  return (
+    !Number.isFinite(speed) ||
+    speed <= 0 ||
+    (legacySpeed !== undefined && Math.abs(speed - legacySpeed) < 0.0001)
+  );
+}
 
 const ACCOUNT_STORAGE_KEY = "foil_app_accounts";
 const SESSION_STORAGE_KEY = "foil_app_session_user";
@@ -420,10 +439,15 @@ function isPortableBackupDataKey(key: string) {
 
 function normalizeLines(lines?: AssignedLine[]) {
   const source = lines && lines.length > 0 ? lines : DEFAULT_LINE_ASSIGNMENTS;
-  const normalized = source.slice(0, 3).map((line, idx) => ({
-    id: String(line.id || DEFAULT_LINE_ASSIGNMENTS[idx]?.id || `${idx + 1}`).trim(),
-    speed: Number(line.speed) > 0 ? Number(line.speed) : DEFAULT_LINE_ASSIGNMENTS[idx]?.speed || 1.3,
-  }));
+  const normalized = source.slice(0, 3).map((line, idx) => {
+    const id = String(line.id || DEFAULT_LINE_ASSIGNMENTS[idx]?.id || `${idx + 1}`).trim();
+    const rawSpeed = Number(line.speed);
+    const fallbackSpeed = DEFAULT_LINE_ASSIGNMENTS[idx]?.speed || getDefaultLineSpeed(id);
+    return {
+      id,
+      speed: shouldUseNewDefaultLineSpeed(id, rawSpeed) ? getDefaultLineSpeed(id, fallbackSpeed) : rawSpeed,
+    };
+  });
   while (normalized.length < 3) {
     const fallback = DEFAULT_LINE_ASSIGNMENTS[normalized.length];
     normalized.push({ id: fallback.id, speed: fallback.speed });
@@ -500,9 +524,16 @@ function createLineDateMap<T>(lines: AssignedLine[], value: T) {
   }, {});
 }
 
+function createLineSpeedInputMap(lines: AssignedLine[]) {
+  return normalizeLines(lines).reduce<Record<LineId, string>>((acc, line) => {
+    acc[line.id] = String(line.speed);
+    return acc;
+  }, {});
+}
+
 function createLineMeterMap(lines: AssignedLine[]) {
   return normalizeLines(lines).reduce<Record<LineId, LineMeterReading>>((acc, line) => {
-    acc[line.id] = { value: null, speed: null, updatedAt: null };
+    acc[line.id] = { value: null, speed: line.speed, updatedAt: null };
     return acc;
   }, {});
 }
@@ -519,11 +550,15 @@ function normalizeLineMeterReadings(raw: unknown, lines: AssignedLine[]) {
       ? null
       : Number(rawValue);
     const speed = rawSpeed === null || rawSpeed === undefined || rawSpeed === ""
-      ? null
+      ? line.speed
       : Number(rawSpeed);
     acc[line.id] = {
       value: value !== null && Number.isFinite(value) && value >= 0 ? value : null,
-      speed: speed !== null && Number.isFinite(speed) && speed >= 0 ? speed : null,
+      speed: speed !== null && Number.isFinite(speed) && speed >= 0
+        ? shouldUseNewDefaultLineSpeed(line.id, speed)
+          ? line.speed
+          : speed
+        : line.speed,
       updatedAt: typeof rawUpdatedAt === "string"
         ? rawUpdatedAt || null
         : null,
@@ -610,10 +645,11 @@ function mergeLineConfigs(
   lines: AssignedLine[],
 ) {
   return normalizeLines(lines).reduce<Record<LineId, LinePlanConfig>>((acc, line) => {
+    const previousSpeed = Number(prev[line.id]?.speed);
     acc[line.id] = prev[line.id]
       ? {
           ...prev[line.id],
-          speed: Number(prev[line.id].speed) || line.speed,
+          speed: shouldUseNewDefaultLineSpeed(line.id, previousSpeed) ? line.speed : previousSpeed,
           speedSegments: Array.isArray(prev[line.id].speedSegments) ? prev[line.id].speedSegments : [],
         }
       : getDefaultLineConfig(line.speed);
@@ -988,6 +1024,10 @@ function getDefaultRangeStatus(lineId: LineId, length: number) {
   if (length < range.min) return "low";
   if (length > range.max) return "high";
   return "ok";
+}
+
+function getRackCountdownMinutes(lineId: LineId) {
+  return lineId === "26" ? 25 : 15;
 }
 
 const CURRENT_SHIFT_TIMELINE_PCT = 88;
@@ -1433,7 +1473,9 @@ function TaskCountdownCard({
             <div className="min-w-0">
               <div className="text-xs font-black text-orange-700/80">最近任务 · {pendingRackTask.line}# 线</div>
               <div className="font-black text-lg text-orange-950 leading-tight">过架子倒计时待开始</div>
-              <div className="text-xs font-bold text-orange-700/70">实际接箔完成后点击，开始 15 分钟计时</div>
+              <div className="text-xs font-bold text-orange-700/70">
+                实际接箔完成后点击，开始 {getRackCountdownMinutes(pendingRackTask.line)} 分钟计时
+              </div>
             </div>
           </div>
           <button
@@ -1487,7 +1529,7 @@ function TaskCountdownCard({
           className="mt-3 w-full rounded-xl bg-orange-600 hover:bg-orange-500 active:scale-[0.99] text-white font-black text-sm py-3 shadow flex items-center justify-center gap-2"
         >
           <CheckSquare size={17} />
-          已处理好，开始过架子15分钟倒计时
+          已处理好，开始过架子{getRackCountdownMinutes(plannedTask.line)}分钟倒计时
         </button>
       )}
     </section>
@@ -3295,7 +3337,7 @@ export default function App() {
     createLineDateMap(lineAssignments, ""),
   );
   const [lineMeterSpeedInputs, setLineMeterSpeedInputs] = useState<Record<LineId, string>>(() =>
-    createLineDateMap(lineAssignments, ""),
+    createLineSpeedInputMap(lineAssignments),
   );
   const [lineMeterMessages, setLineMeterMessages] = useState<Record<LineId, string>>({});
 
@@ -3353,6 +3395,54 @@ export default function App() {
   const backupExportTextRef = useRef<HTMLTextAreaElement | null>(null);
   const alarmIntervalRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const lastWorkbenchMeterSpeedsRef = useRef<Record<LineId, number>>({});
+  const lineMeterReadingsRef = useRef<Record<LineId, LineMeterReading>>({});
+
+  const syncLineMeterSpeedFromWorkbench = (lineId: LineId, speed: number) => {
+    if (!appUser || !Number.isFinite(speed) || speed < 0) return;
+    const roundedSpeed = Number(speed.toFixed(3));
+    const now = new Date();
+    const currentReadings = lineMeterReadingsRef.current;
+    const reading = currentReadings[lineId] || {
+      value: null,
+      speed: null,
+      updatedAt: null,
+    };
+    const liveValue = getLiveLineMeterValue(reading, now);
+    const nextReading: LineMeterReading = liveValue === null
+      ? {
+          value: null,
+          speed: roundedSpeed,
+          updatedAt: null,
+        }
+      : {
+          value: Number(liveValue.toFixed(6)),
+          speed: roundedSpeed,
+          updatedAt: now.toISOString(),
+        };
+    const nextReadings = {
+      ...currentReadings,
+      [lineId]: nextReading,
+    };
+
+    try {
+      writeLocalStorageWithBackup(
+        getRealtimeMeterStorageKey(appUser.username),
+        JSON.stringify(nextReadings),
+      );
+      setLineMeterReadings(nextReadings);
+      setLineMeterSpeedInputs((prev) => ({ ...prev, [lineId]: String(roundedSpeed) }));
+      if (liveValue !== null) {
+        setLineMeterInputs((prev) => ({ ...prev, [lineId]: liveValue.toFixed(2) }));
+      }
+      setLineMeterMessages((prev) => ({
+        ...prev,
+        [lineId]: "已跟随工作台车速更新",
+      }));
+    } catch {
+      setLineMeterMessages((prev) => ({ ...prev, [lineId]: "车速同步失败，请检查本地空间" }));
+    }
+  };
 
   const playRackAlarmBurst = () => {
     const AudioCtor =
@@ -3426,7 +3516,7 @@ export default function App() {
       ),
     }));
     setLineMeterSpeedInputs((prev) => ({
-      ...createLineDateMap(lineAssignments, ""),
+      ...createLineSpeedInputMap(lineAssignments),
       ...Object.fromEntries(
         activeLines
           .filter((line) => Object.prototype.hasOwnProperty.call(prev, line))
@@ -3462,13 +3552,42 @@ export default function App() {
         activeLines.map((line) => [
           line,
           restored[line]?.speed === null || restored[line]?.speed === undefined
-            ? ""
+            ? String(getDefaultLineSpeed(line))
             : String(restored[line].speed),
         ]),
       ),
     );
     setLineMeterMessages({});
   }, [appUser, activeLines, lineAssignments]);
+
+  useEffect(() => {
+    lineMeterReadingsRef.current = lineMeterReadings;
+  }, [lineMeterReadings]);
+
+  useEffect(() => {
+    if (!appUser) return;
+    // One-way sync: planning speed updates realtime meter tracking, but realtime corrections never rewrite the planning speed.
+    const nextSpeeds: Record<LineId, number> = {};
+    activeLines.forEach((lineId) => {
+      const config = lineConfigs[lineId];
+      if (!config) return;
+      const effectiveSpeed = Number(
+        getSpeedAtTime(config, currentTime, scheduleTime).toFixed(3),
+      );
+      nextSpeeds[lineId] = effectiveSpeed;
+      const previousSpeed = lastWorkbenchMeterSpeedsRef.current[lineId];
+      if (
+        previousSpeed !== undefined &&
+        Math.abs(previousSpeed - effectiveSpeed) > 0.0005
+      ) {
+        syncLineMeterSpeedFromWorkbench(lineId, effectiveSpeed);
+      }
+    });
+    lastWorkbenchMeterSpeedsRef.current = {
+      ...lastWorkbenchMeterSpeedsRef.current,
+      ...nextSpeeds,
+    };
+  }, [appUser, activeLines, lineConfigs, currentTime, scheduleTime]);
 
   useEffect(() => {
     if (!appUser) return;
@@ -3906,7 +4025,7 @@ export default function App() {
               ...task,
               status: "waiting_rack",
               rackTimerStartedAt: currentTime,
-              rackTimerDueAt: addMinutes(currentTime, 15),
+              rackTimerDueAt: addMinutes(currentTime, getRackCountdownMinutes(task.line)),
               rackAlarmAcknowledged: false,
             }
           : task,
@@ -3924,7 +4043,7 @@ export default function App() {
         startTime: currentTime,
         status: "waiting_rack",
         rackTimerStartedAt: currentTime,
-        rackTimerDueAt: addMinutes(currentTime, 15),
+        rackTimerDueAt: addMinutes(currentTime, getRackCountdownMinutes(lineId)),
         rackAlarmAcknowledged: false,
         sourceRollId,
       },
@@ -4029,7 +4148,7 @@ export default function App() {
     const rackRemainingMinutes = rackDueAt
       ? Math.ceil((rackDueAt.getTime() - currentTime.getTime()) / 60000)
       : null;
-    // Logic: 30m splice -> wait 15m - 20m -> 10m pass rack
+    // Legacy fallback only. Explicit rack timers use getRackCountdownMinutes by line.
     let displayStatus = "接箔中";
     let urgency = "normal";
     let progress = 0;
@@ -5542,11 +5661,11 @@ export default function App() {
 	                    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
 	                      <div className="bg-slate-800/80 p-5 rounded-2xl border border-slate-700">
 	                        <div className="mb-4">
-	                          <h4 className="text-sm font-bold text-slate-200">
+		                          <h4 className="text-sm font-bold text-slate-200">
 		                            过架子提醒
 		                          </h4>
 		                          <p className="text-[10px] text-slate-400 mt-1">
-		                            接箔前端处理完成后，点击按钮直接启动 15 分钟过架子倒计时。
+		                            接箔前端处理完成后，点击按钮直接启动 {getRackCountdownMinutes(selectedLine)} 分钟过架子倒计时。
 		                          </p>
 	                        </div>
 
@@ -5604,7 +5723,7 @@ export default function App() {
 	                                  onClick={() => handleStartRackCountdown(task.id)}
 	                                  className="mt-3 w-full rounded-lg bg-orange-600 hover:bg-orange-500 px-3 py-2 text-xs font-black text-white"
 	                                >
-	                                  已接好，开始过架子15分钟倒计时
+	                                  已接好，开始过架子{getRackCountdownMinutes(task.line)}分钟倒计时
 	                                </button>
 	                              )}
 	                              {task.rackTimerDueAt && !task.rackAlarmAcknowledged && (
@@ -5623,10 +5742,10 @@ export default function App() {
 	                        <button
 	                          onClick={() => handleConfirmJointPrepComplete(selectedLine, `manual-rack-${Date.now()}`)}
 	                          className="w-full py-4 bg-orange-600 hover:bg-orange-500 text-white font-black text-sm rounded-xl transition-all shadow-[0_0_15px_rgba(234,88,12,0.3)] active:scale-95 flex items-center justify-center gap-2"
-	                        >
-	                          <Scissors size={18} />
-	                          已处理好，开始过架子15分钟倒计时
-	                        </button>
+	                          >
+	                            <Scissors size={18} />
+	                            已处理好，开始过架子{getRackCountdownMinutes(selectedLine)}分钟倒计时
+	                          </button>
 	                      </div>
 
 	                      <div className="bg-slate-800/80 p-5 rounded-2xl border border-slate-700">
@@ -6640,17 +6759,17 @@ export default function App() {
 	                            过架子提醒
 	                          </h4>
 	                          <p className="text-[10px] text-slate-400 mt-1">
-	                            接箔前端处理完成后，点击按钮直接启动 15 分钟过架子倒计时。
+	                            接箔前端处理完成后，点击按钮直接启动 {getRackCountdownMinutes(selectedLine)} 分钟过架子倒计时。
 	                          </p>
                         </div>
 
 	                        <button
 	                          onClick={() => handleConfirmJointPrepComplete(selectedLine, `manual-rack-${Date.now()}`)}
 	                          className="w-full py-4 bg-orange-600 hover:bg-orange-500 text-white font-black text-sm rounded-xl transition-all shadow-[0_0_15px_rgba(234,88,12,0.3)] active:scale-95 flex items-center justify-center gap-2"
-	                        >
-	                          <Scissors size={18} />
-	                          已处理好，开始过架子15分钟倒计时
-	                        </button>
+	                          >
+	                            <Scissors size={18} />
+	                            已处理好，开始过架子{getRackCountdownMinutes(selectedLine)}分钟倒计时
+	                          </button>
                       </div>
 
                       <div className="text-xs text-slate-500 p-4 border border-dashed border-slate-700 rounded-xl bg-slate-900/30">
@@ -6666,7 +6785,7 @@ export default function App() {
                             30分钟。
                           </li>
                           <li>不可在吃饭时间 (11:35等) 进行。</li>
-                          <li>接箔后 15-20分钟需 "过架子" (耗时10m)。</li>
+                          <li>接箔后需过架子：24/25# 线按 15 分钟提醒，26# 线按 25 分钟提醒。</li>
                         </ul>
                       </div>
                     </div>
@@ -6740,6 +6859,9 @@ export default function App() {
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
                 {activeLines.map((lineId, index) => {
                   const reading = lineMeterReadings[lineId] || { value: null, speed: null, updatedAt: null };
+                  const defaultMeterSpeed =
+                    lineAssignments.find((line) => line.id === lineId)?.speed ??
+                    getDefaultLineSpeed(lineId);
                   const comparisonTime = new Date();
                   const liveValue = getLiveLineMeterValue(reading, comparisonTime);
                   const plannedValue = getPlannedLiveMeterValue(
@@ -6876,7 +6998,7 @@ export default function App() {
                                 }}
                                 onFocus={(event) => event.currentTarget.select()}
                                 className="min-w-0 flex-1 bg-transparent px-3 py-3 font-mono text-base font-black text-slate-900 outline-none"
-                                placeholder="1.34"
+                                placeholder={String(defaultMeterSpeed)}
                               />
                               <span className="pr-2 text-[10px] font-bold text-slate-400">m/min</span>
                             </div>
@@ -6908,7 +7030,8 @@ export default function App() {
                           className={cn(
                             "mt-2 min-h-4 text-[11px] font-black",
                             lineMeterMessages[lineId]?.includes("校对完成") ||
-                            lineMeterMessages[lineId] === "车速已调整"
+                            lineMeterMessages[lineId] === "车速已调整" ||
+                            lineMeterMessages[lineId] === "已跟随工作台车速更新"
                               ? "text-emerald-600"
                               : "text-red-500",
                           )}
