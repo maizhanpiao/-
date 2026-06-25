@@ -919,6 +919,42 @@ function getDefaultRangeStatus(lineId: LineId, length: number) {
   return "ok";
 }
 
+const CURRENT_SHIFT_TIMELINE_PCT = 64;
+
+function getTimelineVisualPct(
+  minuteFromStart: number,
+  shiftMinutes: number,
+  timelineMinutes: number,
+  currentShiftPct = CURRENT_SHIFT_TIMELINE_PCT,
+) {
+  const safeShiftMinutes = Math.max(1, shiftMinutes);
+  const futureMinutes = Math.max(1, timelineMinutes - shiftMinutes);
+  if (minuteFromStart <= shiftMinutes) {
+    return (minuteFromStart / safeShiftMinutes) * currentShiftPct;
+  }
+  return (
+    currentShiftPct +
+    ((minuteFromStart - shiftMinutes) / futureMinutes) * (100 - currentShiftPct)
+  );
+}
+
+function getTimelineMinuteFromPct(
+  pct: number,
+  shiftMinutes: number,
+  timelineMinutes: number,
+  currentShiftPct = CURRENT_SHIFT_TIMELINE_PCT,
+) {
+  const safeCurrentShiftPct = Math.max(1, currentShiftPct);
+  const futurePct = Math.max(1, 100 - currentShiftPct);
+  if (pct <= currentShiftPct) {
+    return (pct / safeCurrentShiftPct) * shiftMinutes;
+  }
+  return (
+    shiftMinutes +
+    ((pct - currentShiftPct) / futurePct) * (timelineMinutes - shiftMinutes)
+  );
+}
+
 function updateRollTargetWithBorrow(
   config: LinePlanConfig,
   rollIndex: number,
@@ -1429,7 +1465,28 @@ function CombinedPlanTimeline({
   const shiftEnd = getCurrentShiftEnd(currentTime);
   const shiftMinutes = differenceInMinutes(shiftEnd, shiftStart); // Typically 720
   const timelineMinutes = shiftMinutes * 2;
-  const shiftBoundaryPct = (shiftMinutes / timelineMinutes) * 100;
+  const shiftBoundaryPct = CURRENT_SHIFT_TIMELINE_PCT;
+  const realNowMinutesFromShiftStart = differenceInMinutes(nowTime, shiftStart);
+  const realNowPct = Math.max(
+    0,
+    Math.min(
+      100,
+      getTimelineVisualPct(
+        realNowMinutesFromShiftStart,
+        shiftMinutes,
+        timelineMinutes,
+      ),
+    ),
+  );
+  const shiftBoundaryTicks = Array.from(
+    new Set([
+      ...Array.from(
+        { length: Math.floor(timelineMinutes / shiftMinutes) + 1 },
+        (_, index) => index * shiftMinutes,
+      ).filter((minuteFromStart) => minuteFromStart <= timelineMinutes),
+      timelineMinutes,
+    ]),
+  ).sort((a, b) => a - b);
 
   return (
     <div className="mb-6 flex flex-col gap-6 w-full max-w-full">
@@ -1438,13 +1495,19 @@ function CombinedPlanTimeline({
         <div className="relative w-full text-slate-700 py-4 sm:py-6 pl-2 pr-2 sm:px-0">
           
           <div className="absolute top-0 bottom-0 left-4 right-4 pointer-events-none z-0">
-            {/* Ticks */}
+            {/* Shift boundary ticks */}
             <div className="absolute inset-0 border-l-2 border-slate-300 border-dashed">
-              {[0.25, 0.5, 0.75].map((pct) => (
+              {shiftBoundaryTicks.slice(1, -1).map((minuteFromStart) => (
                 <div
-                  key={pct}
+                  key={minuteFromStart}
                   className="absolute top-0 bottom-0 border-l border-slate-200 border-dashed"
-                  style={{ left: `${pct * 100}%` }}
+                  style={{
+                    left: `${getTimelineVisualPct(
+                      minuteFromStart,
+                      shiftMinutes,
+                      timelineMinutes,
+                    )}%`,
+                  }}
                 ></div>
               ))}
             </div>
@@ -1452,9 +1515,7 @@ function CombinedPlanTimeline({
             {/* Current Time Line */}
             <div
               className="absolute top-8 bottom-0 border-l-2 border-blue-400 border-dashed z-0"
-              style={{
-                left: `${Math.max(0, Math.min(100, (differenceInMinutes(currentTime, shiftStart) / timelineMinutes) * 100))}%`
-              }}
+              style={{ left: `${realNowPct}%` }}
             ></div>
 
             {/* Shift handoff boundary */}
@@ -1468,42 +1529,33 @@ function CombinedPlanTimeline({
             </div>
             
             {/* Labels */}
-            <div className="absolute top-0 left-0 right-0 h-6 text-[10px] text-slate-400 font-bold flex items-start">
-              {Array.from({ length: Math.floor(timelineMinutes / 120) + 1 }, (_, i) => i * 120).map((minuteFromStart) => {
-                const pct = minuteFromStart / timelineMinutes;
+            <div className="absolute top-0 left-0 right-0 h-7 text-slate-400 font-bold flex items-start">
+              {shiftBoundaryTicks.map((minuteFromStart, index) => {
+                const pct =
+                  getTimelineVisualPct(
+                    minuteFromStart,
+                    shiftMinutes,
+                    timelineMinutes,
+                  ) / 100;
                 let transform = "-translate-x-1/2";
                 if (minuteFromStart === 0) transform = "";
-                
+                if (index === shiftBoundaryTicks.length - 1) transform = "-translate-x-full";
+
                 const tickTime = addMinutes(shiftStart, minuteFromStart);
-                const isDifferentDay = tickTime.getDate() !== shiftStart.getDate();
 
                 return (
                   <div
                     key={minuteFromStart}
-                    className={`absolute whitespace-nowrap z-0 ${transform}`}
+                    className={`absolute z-0 flex flex-col leading-none ${transform}`}
                     style={{ left: `${pct * 100}%` }}
                   >
-                    {minuteFromStart === 0 || isDifferentDay
-                      ? format(tickTime, "MM-dd HH:mm") 
-                      : format(tickTime, "HH:mm")}
+                    <span className="text-[9px] sm:text-[10px]">{format(tickTime, "MM-dd")}</span>
+                    <span className="mt-0.5 text-[10px] sm:text-[11px] text-slate-500">
+                      {format(tickTime, "HH:mm")}
+                    </span>
                   </div>
                 );
               })}
-              {/* Current Time Indicator Text */}
-              {(() => {
-                const pct = Math.max(0, Math.min(1, differenceInMinutes(currentTime, shiftStart) / timelineMinutes));
-                let transform = "-translate-x-1/2";
-                if (pct < 0.05) transform = "";
-                if (pct > 0.95) transform = "-translate-x-full";
-                return (
-                  <div
-                    className={`absolute whitespace-nowrap text-blue-500 top-4 bg-slate-50 px-1 rounded z-10 font-bold ${transform}`}
-                    style={{ left: `${pct * 100}%` }}
-                  >
-                    现在 {format(currentTime, "HH:mm")}
-                  </div>
-                );
-              })()}
             </div>
           </div>
 
@@ -1521,7 +1573,7 @@ function CombinedPlanTimeline({
             });
 
             return (
-              <div key={lineId} className="flex flex-col group relative w-full mb-14">
+              <div key={lineId} className="flex flex-col group relative w-full mb-32">
                 <div className="flex items-center gap-1.5 mb-1.5 sticky left-0 z-20 w-fit mix-blend-multiply">
                   <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
                   <span className="font-black text-slate-800 text-xs sm:text-sm">{lineId}# 线</span>
@@ -1539,6 +1591,7 @@ function CombinedPlanTimeline({
                       shiftStart={shiftStart}
                       maxMinutes={timelineMinutes}
                       shiftMinutes={shiftMinutes}
+                      currentShiftPct={CURRENT_SHIFT_TIMELINE_PCT}
                     />
                   </div>
                 </div>
@@ -1816,16 +1869,180 @@ function DraggableTimelineLine({
   shiftStart,
   maxMinutes,
   shiftMinutes,
+  currentShiftPct = CURRENT_SHIFT_TIMELINE_PCT,
 }: any) {
   const barRef = useRef<HTMLDivElement>(null);
   const [draggingIdx, setDraggingIdx] = useState<number | null>(null);
   const [editingRollIdx, setEditingRollIdx] = useState<number | null>(null);
   const [deleteConfirmIdx, setDeleteConfirmIdx] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [editTimeValue, setEditTimeValue] = useState("");
   const [rangeFlashByIdx, setRangeFlashByIdx] = useState<Record<number, number>>({});
   const lastRangeStatusRef = useRef<Record<number, string>>({});
 
   const currMinutesFromStart = differenceInMinutes(currentTime, shiftStart);
+  const minuteToPct = (minuteFromStart: number) =>
+    getTimelineVisualPct(
+      minuteFromStart,
+      shiftMinutes,
+      maxMinutes,
+      currentShiftPct,
+    );
+  const pctToMinute = (pct: number) =>
+    getTimelineMinuteFromPct(
+      pct,
+      shiftMinutes,
+      maxMinutes,
+      currentShiftPct,
+    );
+  const getRollEndTime = (rollIdx: number) => {
+    const cumulative = Number(cumSum[rollIdx] || 0);
+    return addDistanceWithSpeed(
+      currentTime,
+      cumulative - getFirstRollCarryIn(config),
+      config,
+      shiftStart,
+    );
+  };
+
+  const selectRollEditor = (rollIdx: number) => {
+    const roll = config.rolls[rollIdx];
+    if (!roll) return;
+    setEditingRollIdx(rollIdx);
+    setDeleteConfirmIdx(null);
+    setEditValue(Number(roll.targetFormedLength || 0).toFixed(1));
+    setEditTimeValue(format(getRollEndTime(rollIdx), "HH:mm"));
+  };
+
+  const parseTimelineTimeInput = (value: string) => {
+    const match = String(value || "").match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) return null;
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+      return null;
+    }
+    const result = new Date(shiftStart);
+    result.setHours(hours, minutes, 0, 0);
+    if (result.getTime() < shiftStart.getTime()) {
+      result.setDate(result.getDate() + 1);
+    }
+    const timelineEnd = addMinutes(shiftStart, maxMinutes);
+    if (result.getTime() > timelineEnd.getTime()) return timelineEnd;
+    return result;
+  };
+
+  const commitLengthEdit = (rollIdx = editingRollIdx) => {
+    if (rollIdx === null || !config.rolls[rollIdx]) return;
+    const val = parsePositiveDecimalInput(editValue);
+    if (val === null) {
+      setEditValue(Number(config.rolls[rollIdx].targetFormedLength || 0).toFixed(1));
+      return;
+    }
+    checkRangeBoundaryReminder(rollIdx, val);
+    const nextConfig = updateRollTargetWithBorrow(config, rollIdx, val);
+    const nextLength = Number(nextConfig.rolls[rollIdx]?.targetFormedLength || val);
+    const prevLength = rollIdx === 0 ? 0 : Number(cumSum[rollIdx - 1] || 0);
+    const nextEndTime = addDistanceWithSpeed(
+      currentTime,
+      prevLength + nextLength - getFirstRollCarryIn(config),
+      nextConfig,
+      shiftStart,
+    );
+    setEditValue(nextLength.toFixed(1));
+    setEditTimeValue(format(nextEndTime, "HH:mm"));
+    updateConfig(lineId, nextConfig);
+  };
+
+  const commitTimeEdit = (rollIdx = editingRollIdx) => {
+    if (rollIdx === null || !config.rolls[rollIdx]) return;
+    const targetTime = parseTimelineTimeInput(editTimeValue);
+    if (!targetTime) {
+      setEditTimeValue(format(getRollEndTime(rollIdx), "HH:mm"));
+      return;
+    }
+    const firstCarryIn = getFirstRollCarryIn(config);
+    const prevLength = rollIdx === 0 ? 0 : Number(cumSum[rollIdx - 1] || 0);
+    const targetCumulative =
+      distanceBetweenWithSpeed(currentTime, targetTime, config, shiftStart) +
+      firstCarryIn;
+    const nextTargetLength = targetCumulative - prevLength;
+    checkRangeBoundaryReminder(rollIdx, nextTargetLength);
+    const nextConfig = updateRollTargetWithBorrow(config, rollIdx, nextTargetLength);
+    const nextLength = Number(nextConfig.rolls[rollIdx]?.targetFormedLength || 0);
+    setEditValue(nextLength.toFixed(1));
+    setEditTimeValue(format(targetTime, "HH:mm"));
+    updateConfig(lineId, nextConfig);
+  };
+
+  const addRollAfter = (rollIdx: number) => {
+    const roll = config.rolls[rollIdx];
+    if (!roll) return;
+    const newRolls = [...config.rolls];
+    const half = Number(newRolls[rollIdx].targetFormedLength || 0) / 2;
+    const wasJoint = newRolls[rollIdx].isJoint;
+
+    newRolls[rollIdx] = {
+      ...newRolls[rollIdx],
+      targetFormedLength: half,
+      isJoint: false,
+    };
+
+    newRolls.splice(rollIdx + 1, 0, {
+      id: Math.random().toString(),
+      targetFormedLength: half,
+      isJoint: wasJoint,
+      batchNumber: newRolls[rollIdx].batchNumber,
+      formedBatchNo: newRolls[rollIdx].formedBatchNo,
+    });
+    const nextConfig = { ...config, rolls: newRolls };
+    const prevLength = rollIdx === 0 ? 0 : Number(cumSum[rollIdx - 1] || 0);
+    const nextEndTime = addDistanceWithSpeed(
+      currentTime,
+      prevLength + half - getFirstRollCarryIn(config),
+      nextConfig,
+      shiftStart,
+    );
+    updateConfig(lineId, nextConfig);
+    setEditingRollIdx(rollIdx);
+    setEditValue(half.toFixed(1));
+    setEditTimeValue(format(nextEndTime, "HH:mm"));
+  };
+
+  const deleteRollAt = (rollIdx: number) => {
+    const newRolls = [...config.rolls];
+    if (newRolls.length <= 1 || !newRolls[rollIdx]) return false;
+
+    let targetCut: number | null = null;
+    if (rollIdx > 0 && !newRolls[rollIdx - 1].isJoint) {
+      targetCut = rollIdx - 1;
+    } else if (rollIdx < newRolls.length - 1 && !newRolls[rollIdx].isJoint) {
+      targetCut = rollIdx;
+    }
+
+    if (targetCut === null) {
+      alert("无法删除此卷，因为必须保留这部分的接头出带节点！");
+      setDeleteConfirmIdx(null);
+      return false;
+    }
+
+    if (targetCut === rollIdx - 1) {
+      newRolls[rollIdx - 1].targetFormedLength += newRolls[rollIdx].targetFormedLength;
+      newRolls[rollIdx - 1].isJoint = newRolls[rollIdx - 1].isJoint || newRolls[rollIdx].isJoint;
+      newRolls.splice(rollIdx, 1);
+      setEditingRollIdx(Math.max(0, rollIdx - 1));
+    } else {
+      newRolls[rollIdx].targetFormedLength += newRolls[rollIdx + 1].targetFormedLength;
+      newRolls[rollIdx].isJoint = newRolls[rollIdx].isJoint || newRolls[rollIdx + 1].isJoint;
+      newRolls.splice(rollIdx + 1, 1);
+      setEditingRollIdx(Math.min(rollIdx, newRolls.length - 1));
+    }
+
+    updateConfig(lineId, { ...config, rolls: newRolls });
+    setDeleteConfirmIdx(null);
+    return true;
+  };
+
   const triggerRangeReminder = (rollIdx: number) => {
     const token = Date.now();
     setRangeFlashByIdx((prev) => ({ ...prev, [rollIdx]: token }));
@@ -1860,7 +2077,7 @@ function DraggableTimelineLine({
       x = Math.max(0, Math.min(rect.width, x));
 
       // X corresponds to absolute minutes from shift start
-      const cursorMinutesFromStart = (x / rect.width) * maxMinutes;
+      const cursorMinutesFromStart = pctToMinute((x / rect.width) * 100);
 
       // Convert time back to cumulative length
       const firstCarryIn = getFirstRollCarryIn(config);
@@ -1900,6 +2117,8 @@ function DraggableTimelineLine({
       };
       checkRangeBoundaryReminder(draggingIdx, newRolls[draggingIdx].targetFormedLength);
       checkRangeBoundaryReminder(draggingIdx + 1, newRolls[draggingIdx + 1].targetFormedLength);
+      setEditValue(Number(newRolls[draggingIdx].targetFormedLength || 0).toFixed(1));
+      setEditTimeValue(format(cursorTime, "HH:mm"));
 
       updateConfig(lineId, { ...config, rolls: newRolls });
     };
@@ -1920,6 +2139,8 @@ function DraggableTimelineLine({
     lineId,
     cumSum,
     maxMinutes,
+    shiftMinutes,
+    currentShiftPct,
     updateConfig,
     currMinutesFromStart,
   ]);
@@ -1937,10 +2158,10 @@ function DraggableTimelineLine({
         const endMinutesFromStart = differenceInMinutes(endTime, shiftStart);
         const startTime = subtractDistanceWithSpeed(endTime, cr.length, config, shiftStart);
         const startMinutesFromStart = differenceInMinutes(startTime, shiftStart);
-        const durationMinutes = Math.max(0, endMinutesFromStart - startMinutesFromStart);
         
-        const pctLeft = (startMinutesFromStart / maxMinutes) * 100;
-        const pctWidth = (durationMinutes / maxMinutes) * 100;
+        const pctLeft = minuteToPct(startMinutesFromStart);
+        const pctRight = minuteToPct(endMinutesFromStart);
+        const pctWidth = pctRight - pctLeft;
         
         return (
           <div
@@ -1972,11 +2193,32 @@ function DraggableTimelineLine({
         const startMinutesFromShiftStart = differenceInMinutes(startTime, shiftStart);
         const endMinutesFromShiftStart = differenceInMinutes(endTime, shiftStart);
 
-        const pctLeft = (startMinutesFromShiftStart / maxMinutes) * 100;
+        const pctLeft = minuteToPct(startMinutesFromShiftStart);
         const pctWidth =
-          ((endMinutesFromShiftStart - startMinutesFromShiftStart) /
-            maxMinutes) *
-          100;
+          minuteToPct(endMinutesFromShiftStart) -
+          pctLeft;
+        const jointAfterStartPct = roll.isJoint
+          ? Math.max(
+              0,
+              Math.min(
+                100,
+                ((minuteToPct(
+                  differenceInMinutes(
+                    addSignedDistanceWithSpeed(
+                      currentTime,
+                      currLength - firstCarryIn - 240,
+                      config,
+                      shiftStart,
+                    ),
+                    shiftStart,
+                  ),
+                ) -
+                  pctLeft) /
+                  Math.max(1, pctWidth)) *
+                  100,
+              ),
+            )
+          : null;
 
         const isPoppedOut = pctWidth < 20;
         const rangeStatus = getDefaultRangeStatus(lineId, Number(roll.targetFormedLength || 0));
@@ -1996,10 +2238,29 @@ function DraggableTimelineLine({
               left: `${pctLeft}%`,
               width: `${pctWidth}%`,
               backgroundColor: roll.isJoint
-                ? `hsl(28, 90%, ${i % 2 === 0 ? "85%" : "80%"})` // orange color 
+                ? `hsl(32, 95%, ${i % 2 === 0 ? "90%" : "86%"})` // joint roll base
                 : `hsl(215, 80%, ${i % 2 === 0 ? "90%" : "85%"})`, 
             }}
           >
+            {roll.isJoint && jointAfterStartPct !== null && jointAfterStartPct < 100 && (
+              <div
+                className="absolute inset-y-0 right-0 pointer-events-none border-l border-orange-500/45"
+                style={{
+                  left: `${jointAfterStartPct}%`,
+                  background:
+                    "repeating-linear-gradient(135deg, rgba(251, 146, 60, 0.62) 0px, rgba(251, 146, 60, 0.62) 7px, rgba(248, 113, 113, 0.5) 7px, rgba(248, 113, 113, 0.5) 14px)",
+                }}
+              >
+                {pctWidth * (1 - jointAfterStartPct / 100) >= 7 && (
+                  <div className="absolute inset-y-0 left-1 flex items-center">
+                    <span className="rounded bg-orange-600/90 px-1 py-0.5 text-[8px] font-black leading-none text-white shadow-sm">
+                      接箔后
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Joint Marker at the end of the roll */}
             {roll.isJoint && (
               <div className="absolute right-0 top-full mt-2 pointer-events-none flex flex-col items-center select-none" style={{ transform: "translateX(50%)" }}>
@@ -2028,12 +2289,10 @@ function DraggableTimelineLine({
                 }}
                 onClick={(e) => {
                   e.stopPropagation();
-                  setEditingRollIdx(i);
-                  setDeleteConfirmIdx(null);
-                  setEditValue(roll.targetFormedLength.toFixed(1));
+                  selectRollEditor(i);
                 }}
               >
-                {editingRollIdx === i ? (
+                {false && editingRollIdx === i ? (
                   <div className="relative flex items-center gap-1 bg-white p-0.5 rounded shadow border border-slate-200" onClick={e => e.stopPropagation()}>
                     <form onSubmit={(e) => {
                       e.preventDefault();
@@ -2042,15 +2301,16 @@ function DraggableTimelineLine({
                     }} className="flex items-center">
                       <input 
                         autoFocus
-                        type="number"
+                        type="text"
+                        inputMode="decimal"
                         step="0.1"
                         className="w-14 pl-1 py-1 text-xs font-bold text-blue-900 border border-blue-400 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 shadow-inner"
                         style={{ appearance: 'none', WebkitAppearance: 'none' }}
                         value={editValue}
                         onChange={(e) => setEditValue(e.target.value)}
                         onBlur={() => {
-                          let val = parseFloat(editValue);
-                          if (!isNaN(val) && val !== roll.targetFormedLength) {
+                          const val = parsePositiveDecimalInput(editValue);
+                          if (val !== null && val !== roll.targetFormedLength) {
                             checkRangeBoundaryReminder(i, val);
                             updateConfig(lineId, updateRollTargetWithBorrow(config, i, val));
                           }
@@ -2231,7 +2491,7 @@ function DraggableTimelineLine({
         const nodeTime = addDistanceWithSpeed(currentTime, h - getFirstRollCarryIn(config), config, shiftStart);
         const minutesElapsed = differenceInMinutes(nodeTime, currentTime);
         const minutesFromShiftStart = currMinutesFromStart + minutesElapsed;
-        const leftPct = (minutesFromShiftStart / maxMinutes) * 100;
+        const leftPct = minuteToPct(minutesFromShiftStart);
         const isJoint = config.rolls[i].isJoint;
         const isDraggable = !isJoint;
         const isBoundaryFlashing = Boolean(rangeFlashByIdx[i] || rangeFlashByIdx[i + 1]);
@@ -2241,7 +2501,7 @@ function DraggableTimelineLine({
         if (isJoint) {
           const frontStartTimeForNode = addSignedDistanceWithSpeed(currentTime, h - getFirstRollCarryIn(config) - 240, config, shiftStart);
           const frontStartFromShiftStart = differenceInMinutes(frontStartTimeForNode, shiftStart);
-          frontStartLeftPct = (frontStartFromShiftStart / maxMinutes) * 100;
+          frontStartLeftPct = minuteToPct(frontStartFromShiftStart);
           frontStartTime = frontStartTimeForNode;
         }
 
@@ -2264,20 +2524,24 @@ function DraggableTimelineLine({
             
             <div
               className={cn(
-                "absolute top-0 bottom-0 w-8 -ml-4 flex justify-center items-center z-20 transition-colors touch-none pointer-events-none",
-                isDraggable && "pointer-events-auto cursor-col-resize hover:bg-black/5 active:bg-black/10"
+                "absolute top-0 bottom-0 w-8 -ml-4 flex justify-center items-center z-20 transition-colors touch-none pointer-events-auto",
+                isDraggable && "cursor-col-resize hover:bg-black/5 active:bg-black/10"
               )}
               style={{ left: `${leftPct}%` }}
               onPointerDown={(e) => {
+                e.stopPropagation();
+                selectRollEditor(i);
                 if (!isDraggable) return;
                 e.currentTarget.setPointerCapture(e.pointerId);
                 setDraggingIdx(i);
               }}
               onPointerUp={(e) => {
+                e.stopPropagation();
                 if (!isDraggable) return;
                 e.currentTarget.releasePointerCapture(e.pointerId);
                 setDraggingIdx(null);
               }}
+              onClick={(e) => e.stopPropagation()}
             >
               <div
                 className={cn(
@@ -2308,6 +2572,154 @@ function DraggableTimelineLine({
           </React.Fragment>
         );
       })}
+
+      {editingRollIdx !== null && config.rolls[editingRollIdx] && (
+        <div
+          className="absolute left-0 right-0 top-full z-50 mt-3 rounded-xl border border-slate-200 bg-white p-3 shadow-xl"
+          onClick={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {(() => {
+            const activeRoll = config.rolls[editingRollIdx];
+            const activeEndTime = getRollEndTime(editingRollIdx);
+            const timeLabel =
+              activeEndTime.getDate() !== shiftStart.getDate()
+                ? format(activeEndTime, "MM-dd HH:mm")
+                : format(activeEndTime, "HH:mm");
+            const rangeStatus = getDefaultRangeStatus(
+              lineId,
+              Number(activeRoll.targetFormedLength || 0),
+            );
+            return (
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-xs font-black text-slate-800">
+                      {lineId}# 线 · 卷 #{editingRollIdx + 1}
+                    </div>
+                    <div className="text-[10px] font-bold text-slate-400">
+                      当前分卷时间 {timeLabel}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingRollIdx(null);
+                      setDeleteConfirmIdx(null);
+                    }}
+                    className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-black text-slate-500 active:scale-95"
+                  >
+                    收起
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="min-w-0">
+                    <span className="mb-1 block text-[10px] font-black text-slate-500">
+                      目标米数
+                    </span>
+                    <div className={cn(
+                      "flex min-w-0 items-center rounded-lg border bg-slate-50 focus-within:ring-2",
+                      rangeStatus !== "ok"
+                        ? "border-red-300 focus-within:ring-red-200"
+                        : "border-slate-200 focus-within:ring-blue-200",
+                    )}>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={editValue}
+                        onChange={(event) => setEditValue(event.currentTarget.value)}
+                        onBlur={() => commitLengthEdit(editingRollIdx)}
+                        onFocus={(event) => event.currentTarget.select()}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            commitLengthEdit(editingRollIdx);
+                            event.currentTarget.blur();
+                          }
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            setEditValue(Number(activeRoll.targetFormedLength || 0).toFixed(1));
+                            event.currentTarget.blur();
+                          }
+                        }}
+                        className="min-w-0 flex-1 bg-transparent px-2 py-2 text-sm font-black font-mono text-slate-900 outline-none"
+                      />
+                      <span className="pr-2 text-[10px] font-bold text-slate-400">m</span>
+                    </div>
+                  </label>
+
+                  <label className="min-w-0">
+                    <span className="mb-1 block text-[10px] font-black text-slate-500">
+                      分卷时间
+                    </span>
+                    <input
+                      type="time"
+                      value={editTimeValue}
+                      onChange={(event) => setEditTimeValue(event.currentTarget.value)}
+                      onBlur={() => commitTimeEdit(editingRollIdx)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          commitTimeEdit(editingRollIdx);
+                          event.currentTarget.blur();
+                        }
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          setEditTimeValue(format(getRollEndTime(editingRollIdx), "HH:mm"));
+                          event.currentTarget.blur();
+                        }
+                      }}
+                      className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-sm font-black font-mono text-slate-900 outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-200"
+                    />
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => addRollAfter(editingRollIdx)}
+                    className="flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-black text-white shadow-sm active:scale-95"
+                  >
+                    <Plus size={14} strokeWidth={3} />
+                    加卷
+                  </button>
+
+                  {config.rolls.length > 1 && (
+                    deleteConfirmIdx === editingRollIdx ? (
+                      <div className="grid grid-cols-2 gap-1">
+                        <button
+                          type="button"
+                          onClick={() => deleteRollAt(editingRollIdx)}
+                          className="rounded-lg bg-red-600 px-2 py-2 text-[11px] font-black text-white active:scale-95"
+                        >
+                          确认
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeleteConfirmIdx(null)}
+                          className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-[11px] font-black text-slate-600 active:scale-95"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setDeleteConfirmIdx(editingRollIdx)}
+                        className="flex items-center justify-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-black text-red-600 active:scale-95"
+                      >
+                        <Trash2 size={14} />
+                        删除
+                      </button>
+                    )
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
     </div>
   );
 }
@@ -2732,6 +3144,7 @@ export default function App() {
   >(() => createLineConfigMap(lineAssignments));
   const [lineSpeedDrafts, setLineSpeedDrafts] = useState<Partial<Record<LineId, string>>>({});
   const [segmentSpeedDrafts, setSegmentSpeedDrafts] = useState<Record<string, string>>({});
+  const [rollTargetDrafts, setRollTargetDrafts] = useState<Record<string, string>>({});
 
   // -- form states --
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -2752,6 +3165,7 @@ export default function App() {
   const [forecastLengths, setForecastLengths] = useState<Record<string, string>>({});
   const [showOnlyJointPrep, setShowOnlyJointPrep] = useState(false);
   const [showCompletedRolls, setShowCompletedRolls] = useState(false);
+  const [showPastShiftEvents, setShowPastShiftEvents] = useState(false);
   const [localBackupMessage, setLocalBackupMessage] = useState("");
   const [backupExportDialog, setBackupExportDialog] = useState<{
     fileName: string;
@@ -4714,7 +5128,50 @@ export default function App() {
                         return <div className="text-sm text-slate-400 italic pl-12 text-center py-4">当前班次无分卷任务</div>;
                       }
 
-                      return allEvents.map((evt, idx) => {
+                      const pastEvents = allEvents.filter(
+                        (evt) => evt.time.getTime() < currentTime.getTime(),
+                      );
+                      const visibleEvents = showPastShiftEvents
+                        ? allEvents
+                        : allEvents.filter((evt) => evt.time.getTime() >= currentTime.getTime());
+
+                      return (
+                        <>
+                          {pastEvents.length > 0 && (
+                            <div className="relative z-20 mb-1 flex items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 pl-12">
+                              <div className="min-w-0">
+                                <div className="text-[11px] font-black text-slate-700">
+                                  已过时间任务
+                                </div>
+                                <div className="text-[10px] font-bold text-slate-400">
+                                  {showPastShiftEvents
+                                    ? `已展开 ${pastEvents.length} 项，可回顾本班次全部计划`
+                                    : `已折叠 ${pastEvents.length} 项，当前只显示后续任务`}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setShowPastShiftEvents((prev) => !prev)}
+                                className="flex shrink-0 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-black text-slate-600 shadow-sm active:scale-95"
+                              >
+                                <ChevronRight
+                                  size={13}
+                                  className={cn(
+                                    "transition-transform",
+                                    showPastShiftEvents && "rotate-90",
+                                  )}
+                                />
+                                {showPastShiftEvents ? "收起" : "展开"}
+                              </button>
+                            </div>
+                          )}
+
+                          {visibleEvents.length === 0 ? (
+                            <div className="relative z-10 py-6 pl-12 text-center text-sm font-bold text-emerald-600">
+                              本班次剩余任务已全部完成
+                            </div>
+                          ) : (
+                            visibleEvents.map((evt) => {
                         return (
                           <div key={evt.id} className="flex items-stretch gap-4 relative z-10 group">
                             {/* Time */}
@@ -4800,7 +5257,10 @@ export default function App() {
                             </div>
                           </div>
                         );
-                      });
+                            })
+                          )}
+                        </>
+                      );
                     })()}
                   </div>
                 </section>
@@ -5538,6 +5998,23 @@ export default function App() {
                               {itemsToRender.map((r, i) => {
                                 const isNextShift =
                                   r.endTime.getTime() > shiftEnd.getTime();
+                                const draftKey = `${selectedLine}:${r.id}`;
+                                const draftValue = rollTargetDrafts[draftKey];
+                                const commitTargetDraft = () => {
+                                  const nextTarget = parsePositiveDecimalInput(
+                                    draftValue ?? String(r.targetFormedLength),
+                                  );
+                                  setRollTargetDrafts((prev) => {
+                                    const next = { ...prev };
+                                    delete next[draftKey];
+                                    return next;
+                                  });
+                                  if (nextTarget === null || nextTarget === r.targetFormedLength) return;
+                                  setLineConfigs((p) => ({
+                                    ...p,
+                                    [selectedLine]: updateRollTargetWithBorrow(p[selectedLine], i, nextTarget),
+                                  }));
+                                };
                                 return (
                                   <div
                                     key={r.id}
@@ -5589,16 +6066,38 @@ export default function App() {
                                       </div>
                                       <div className="flex items-center gap-2">
                                         <input
-                                          type="number"
-                                          value={r.targetFormedLength}
-                                          onChange={(e) => {
-                                            if (e.target.value === "") return;
-                                            const n = Number(e.target.value);
-                                            if (!Number.isFinite(n)) return;
-                                            setLineConfigs((p) => ({
-                                              ...p,
-                                              [selectedLine]: updateRollTargetWithBorrow(p[selectedLine], i, n),
+                                          type="text"
+                                          inputMode="decimal"
+                                          value={draftValue ?? String(r.targetFormedLength)}
+                                          onChange={(event) => {
+                                            const nextValue = event.currentTarget.value;
+                                            setRollTargetDrafts((prev) => ({
+                                              ...prev,
+                                              [draftKey]: nextValue,
                                             }));
+                                          }}
+                                          onBlur={commitTargetDraft}
+                                          onFocus={(event) => {
+                                            const nextValue = event.currentTarget.value;
+                                            setRollTargetDrafts((prev) => ({
+                                              ...prev,
+                                              [draftKey]: nextValue,
+                                            }));
+                                            event.currentTarget.select();
+                                          }}
+                                          onKeyDown={(event) => {
+                                            if (event.key === "Enter") {
+                                              event.preventDefault();
+                                              event.currentTarget.blur();
+                                            }
+                                            if (event.key === "Escape") {
+                                              setRollTargetDrafts((prev) => {
+                                                const next = { ...prev };
+                                                delete next[draftKey];
+                                                return next;
+                                              });
+                                              event.currentTarget.blur();
+                                            }
                                           }}
                                           className={cn(
                                             "w-20 bg-slate-950 border rounded p-1 text-center font-mono text-sm font-bold text-white outline-none",
