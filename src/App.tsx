@@ -1521,7 +1521,29 @@ function CombinedPlanTimeline({
   const shiftStart = getCurrentShiftStart(currentTime);
   const shiftEnd = getCurrentShiftEnd(currentTime);
   const shiftMinutes = differenceInMinutes(shiftEnd, shiftStart); // Typically 720
-  const timelineMinutes = shiftMinutes * 2;
+  const furthestPlanMinutes = lines.reduce((maxMinutesSoFar, lineId) => {
+    const config = lineConfigs[lineId];
+    const plannedEndLength = (config.rolls || []).reduce(
+      (sum, roll) => sum + Number(roll.targetFormedLength || 0),
+      0,
+    );
+    const plannedDistance = Math.max(0, plannedEndLength - getFirstRollCarryIn(config));
+    const plannedEndTime = addDistanceWithSpeed(
+      currentTime,
+      plannedDistance,
+      config,
+      shiftStart,
+    );
+    return Math.max(
+      maxMinutesSoFar,
+      differenceInMinutes(plannedEndTime, shiftStart),
+    );
+  }, 0);
+  const timelineMinutes =
+    Math.ceil(
+      Math.max(shiftMinutes * 2, furthestPlanMinutes + shiftMinutes * 0.25) /
+        shiftMinutes,
+    ) * shiftMinutes;
   const shiftBoundaryPct = getTimelineVisualPct(
     shiftMinutes,
     shiftMinutes,
@@ -1550,6 +1572,10 @@ function CombinedPlanTimeline({
       timelineMinutes,
     ]),
   ).sort((a, b) => a - b);
+  const shiftSpanTicks = Array.from(
+    { length: Math.ceil(timelineMinutes / shiftMinutes) },
+    (_, index) => index * shiftMinutes,
+  ).filter((minuteFromStart) => minuteFromStart < timelineMinutes);
 
   return (
     <div className="mb-6 flex flex-col gap-6 w-full max-w-full">
@@ -1596,6 +1622,34 @@ function CombinedPlanTimeline({
             
             {/* Labels */}
             <div className="absolute top-0 left-0 right-0 h-7 text-slate-400 font-bold flex items-start">
+              {shiftSpanTicks.map((minuteFromStart) => {
+                const segmentStart = addMinutes(shiftStart, minuteFromStart);
+                const segmentEnd = addMinutes(segmentStart, shiftMinutes);
+                const centerPct =
+                  getTimelineVisualPct(
+                    minuteFromStart + shiftMinutes / 2,
+                    shiftMinutes,
+                    timelineMinutes,
+                  ) / 100;
+                return (
+                  <div
+                    key={`span-${minuteFromStart}`}
+                    className="absolute top-0 z-10 flex -translate-x-1/2 flex-col items-center rounded-md bg-slate-50/90 px-1.5 py-0.5 text-center leading-none shadow-[0_0_0_1px_rgba(203,213,225,0.55)]"
+                    style={{ left: `${centerPct * 100}%` }}
+                  >
+                    <span className="whitespace-nowrap text-[9px] font-black text-slate-500 sm:text-[10px]">
+                      {format(segmentStart, "MM-dd")}
+                      <span className="ml-1 text-blue-600">
+                        {getShiftOwnershipLabel(segmentStart, rosterSettings)}
+                      </span>
+                    </span>
+                    <span className="mt-0.5 whitespace-nowrap text-[8px] font-bold text-slate-400 sm:text-[9px]">
+                      {format(segmentStart, "HH:mm")}-{format(segmentEnd, "HH:mm")}
+                    </span>
+                  </div>
+                );
+              })}
+
               {shiftBoundaryTicks.map((minuteFromStart, index) => {
                 const pct =
                   getTimelineVisualPct(
@@ -1608,21 +1662,17 @@ function CombinedPlanTimeline({
                 if (index === shiftBoundaryTicks.length - 1) transform = "-translate-x-full";
 
                 const tickTime = addMinutes(shiftStart, minuteFromStart);
-                const tickShiftLabel = getShiftOwnershipLabel(tickTime, rosterSettings);
 
                 return (
                   <div
                     key={minuteFromStart}
-                    className={`absolute z-0 flex flex-col leading-none ${transform}`}
+                    className={`absolute top-0 z-0 flex flex-col leading-none ${transform}`}
                     style={{ left: `${pct * 100}%` }}
                   >
-                    <span className="text-[9px] sm:text-[10px]">
+                    <span className="text-[8px] text-slate-300 sm:text-[9px]">
                       {format(tickTime, "MM-dd")}
-                      <span className="ml-1 rounded bg-blue-50 px-1 py-0.5 text-[8px] font-black text-blue-600">
-                        {tickShiftLabel}
-                      </span>
                     </span>
-                    <span className="mt-0.5 text-[10px] sm:text-[11px] text-slate-500">
+                    <span className="mt-0.5 text-[9px] text-slate-400 sm:text-[10px]">
                       {format(tickTime, "HH:mm")}
                     </span>
                   </div>
@@ -1631,7 +1681,7 @@ function CombinedPlanTimeline({
             </div>
           </div>
 
-          <div className="mt-8 space-y-5 relative z-10 w-full px-4">
+          <div className="mt-7 space-y-2 relative z-10 w-full px-4">
 
         {lines.map((lineId) => {
           const config = lineConfigs[lineId];
@@ -1645,7 +1695,7 @@ function CombinedPlanTimeline({
             });
 
             return (
-              <div key={lineId} className="flex flex-col group relative w-full mb-32">
+              <div key={lineId} className="flex flex-col group relative w-full mb-16 sm:mb-20">
                 <div className="flex items-center gap-1.5 mb-1.5 sticky left-0 z-20 w-fit mix-blend-multiply">
                   <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
                   <span className="font-black text-slate-800 text-xs sm:text-sm">{lineId}# 线</span>
@@ -1946,10 +1996,13 @@ function DraggableTimelineLine({
   const barRef = useRef<HTMLDivElement>(null);
   const [draggingIdx, setDraggingIdx] = useState<number | null>(null);
   const [editingRollIdx, setEditingRollIdx] = useState<number | null>(null);
+  const [editorAnchorPct, setEditorAnchorPct] = useState(50);
   const [deleteConfirmIdx, setDeleteConfirmIdx] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
   const [editTimeValue, setEditTimeValue] = useState("");
   const [rangeFlashByIdx, setRangeFlashByIdx] = useState<Record<number, number>>({});
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+  const dragMovedRef = useRef(false);
   const lastRangeStatusRef = useRef<Record<number, string>>({});
 
   const currMinutesFromStart = differenceInMinutes(currentTime, shiftStart);
@@ -1977,10 +2030,11 @@ function DraggableTimelineLine({
     );
   };
 
-  const selectRollEditor = (rollIdx: number) => {
+  const selectRollEditor = (rollIdx: number, anchorPct = 50) => {
     const roll = config.rolls[rollIdx];
     if (!roll) return;
     setEditingRollIdx(rollIdx);
+    setEditorAnchorPct(Math.max(4, Math.min(96, anchorPct)));
     setDeleteConfirmIdx(null);
     setEditValue(Number(roll.targetFormedLength || 0).toFixed(1));
     setEditTimeValue(format(getRollEndTime(rollIdx), "HH:mm"));
@@ -2144,6 +2198,13 @@ function DraggableTimelineLine({
   useEffect(() => {
     const handleMove = (e: PointerEvent) => {
       if (draggingIdx === null || !barRef.current) return;
+      if (dragStartRef.current) {
+        const dx = Math.abs(e.clientX - dragStartRef.current.x);
+        const dy = Math.abs(e.clientY - dragStartRef.current.y);
+        if (dx > 4 || dy > 4) {
+          dragMovedRef.current = true;
+        }
+      }
       const rect = barRef.current.getBoundingClientRect();
       let x = e.clientX - rect.left;
       x = Math.max(0, Math.min(rect.width, x));
@@ -2194,7 +2255,10 @@ function DraggableTimelineLine({
 
       updateConfig(lineId, { ...config, rolls: newRolls });
     };
-    const handleUp = () => setDraggingIdx(null);
+    const handleUp = () => {
+      setDraggingIdx(null);
+      dragStartRef.current = null;
+    };
 
     if (draggingIdx !== null) {
       window.addEventListener("pointermove", handleMove);
@@ -2353,7 +2417,7 @@ function DraggableTimelineLine({
                 }}
                 onClick={(e) => {
                   e.stopPropagation();
-                  selectRollEditor(i);
+                  selectRollEditor(i, pctLeft + pctWidth / 2);
                 }}
               >
                 {false && editingRollIdx === i ? (
@@ -2594,16 +2658,32 @@ function DraggableTimelineLine({
               style={{ left: `${leftPct}%` }}
               onPointerDown={(e) => {
                 e.stopPropagation();
-                selectRollEditor(i);
-                if (!isDraggable) return;
+                if (!isDraggable) {
+                  selectRollEditor(i, leftPct);
+                  return;
+                }
+                dragStartRef.current = { x: e.clientX, y: e.clientY };
+                dragMovedRef.current = false;
+                setEditingRollIdx(null);
+                setDeleteConfirmIdx(null);
                 e.currentTarget.setPointerCapture(e.pointerId);
                 setDraggingIdx(i);
               }}
               onPointerUp={(e) => {
                 e.stopPropagation();
                 if (!isDraggable) return;
-                e.currentTarget.releasePointerCapture(e.pointerId);
+                if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                  e.currentTarget.releasePointerCapture(e.pointerId);
+                }
+                if (!dragMovedRef.current) {
+                  selectRollEditor(i, leftPct);
+                }
                 setDraggingIdx(null);
+                dragStartRef.current = null;
+              }}
+              onPointerCancel={() => {
+                setDraggingIdx(null);
+                dragStartRef.current = null;
               }}
               onClick={(e) => e.stopPropagation()}
             >
@@ -2637,9 +2717,14 @@ function DraggableTimelineLine({
         );
       })}
 
-      {editingRollIdx !== null && config.rolls[editingRollIdx] && (
+      {editingRollIdx !== null && draggingIdx === null && config.rolls[editingRollIdx] && (
         <div
-          className="absolute left-0 right-0 top-full z-50 mt-3 rounded-xl border border-slate-200 bg-white p-3 shadow-xl"
+          className="absolute top-full z-50 mt-3 rounded-xl border border-slate-200 bg-white p-3 shadow-xl"
+          style={{
+            left: `min(max(${editorAnchorPct}%, 160px), calc(100% - 160px))`,
+            width: "min(320px, calc(100vw - 32px))",
+            transform: "translateX(-50%)",
+          }}
           onClick={(e) => e.stopPropagation()}
           onPointerDown={(e) => e.stopPropagation()}
         >
@@ -3242,6 +3327,7 @@ export default function App() {
   const [showOnlyJointPrep, setShowOnlyJointPrep] = useState(false);
   const [showCompletedRolls, setShowCompletedRolls] = useState(false);
   const [showPastShiftEvents, setShowPastShiftEvents] = useState(false);
+  const [showWorkbenchControls, setShowWorkbenchControls] = useState(true);
   const [localBackupMessage, setLocalBackupMessage] = useState("");
   const [backupExportDialog, setBackupExportDialog] = useState<{
     fileName: string;
@@ -5341,29 +5427,72 @@ export default function App() {
                   </div>
                 </section>
               {/* Tactical Action Terminal (Right Column) */}
-              <div className="flex flex-col overflow-hidden bg-slate-900 rounded-2xl shadow-xl border border-slate-800 shrink-0 h-auto min-h-[500px]">
-                <div className="p-3 border-b border-slate-800 shrink-0">
-                  {/* Target Line Selector global for the terminal */}
-                  <div className="bg-slate-950 p-1.5 rounded-xl flex gap-1">
-                    {activeLines.map((line) => (
-                      <button
-                        key={line}
-                        onClick={() => setSelectedLine(line)}
-                        className={cn(
-                          "flex-1 py-2 rounded-lg text-sm font-bold transition-all",
-                          selectedLine === line
-                            ? "bg-blue-600 text-white shadow-inner"
-                            : "text-slate-400 hover:text-slate-200 hover:bg-slate-800",
-                        )}
-                      >
-                        {line}#生产线
-                      </button>
-                    ))}
-                  </div>
+              <div className={cn(
+                "flex flex-col shrink-0 h-auto transition-all",
+                showWorkbenchControls
+                  ? "overflow-hidden bg-slate-900 rounded-2xl shadow-xl border border-slate-800 min-h-[500px]"
+                  : "items-end overflow-visible bg-transparent border-0 shadow-none min-h-0",
+              )}>
+                <div className={cn(
+                  "shrink-0",
+                  showWorkbenchControls
+                    ? "p-3 border-b border-slate-800"
+                    : "p-0 flex justify-end",
+                )}>
+                  <button
+                    type="button"
+                    onClick={() => setShowWorkbenchControls((prev) => !prev)}
+                    className={cn(
+                      "transition-all active:scale-[0.98]",
+                      showWorkbenchControls
+                        ? "mb-3 flex w-full items-center justify-between gap-3 rounded-xl bg-slate-800/70 px-3 py-2 text-left text-slate-200 hover:bg-slate-800"
+                        : "inline-flex h-7 w-7 items-center justify-center text-slate-300 hover:text-slate-600",
+                    )}
+                    aria-label={showWorkbenchControls ? "收起操作区" : "展开操作区"}
+                  >
+                    {showWorkbenchControls ? (
+                      <>
+                        <span className="min-w-0">
+                          <span className="block text-xs font-black">
+                            {selectedLine}# 线操作区
+                          </span>
+                          <span className="block text-[10px] font-bold text-slate-500">
+                            参数设置与过架子提醒
+                          </span>
+                        </span>
+                        <span className="flex shrink-0 items-center gap-1 text-[11px] font-black text-blue-300">
+                          <ChevronRight size={14} className="rotate-90 transition-transform" />
+                          收起
+                        </span>
+                      </>
+                    ) : (
+                      <ChevronRight size={18} strokeWidth={3} />
+                    )}
+                  </button>
+
+                  {showWorkbenchControls && (
+                    <div className="bg-slate-950 p-1.5 rounded-xl flex gap-1">
+                      {activeLines.map((line) => (
+                        <button
+                          key={line}
+                          onClick={() => setSelectedLine(line)}
+                          className={cn(
+                            "flex-1 py-2 rounded-lg text-sm font-bold transition-all",
+                            selectedLine === line
+                              ? "bg-blue-600 text-white shadow-inner"
+                              : "text-slate-400 hover:text-slate-200 hover:bg-slate-800",
+                          )}
+                        >
+                          {line}#生产线
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 {/* Tab Content Area */}
-                <div className="p-6 flex-1 overflow-y-auto bg-slate-900/50 hide-scrollbar">
+                {showWorkbenchControls && (
+                  <div className="p-6 flex-1 overflow-y-auto bg-slate-900/50 hide-scrollbar">
 	                  {/* Tab: Plan */}
 	                  {activeTab === "plan" && (
 	                    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -6532,7 +6661,8 @@ export default function App() {
                       </div>
                     </div>
                   )}
-                </div>
+                  </div>
+                )}
               </div>
 
 
