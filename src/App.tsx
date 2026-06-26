@@ -4006,6 +4006,38 @@ export default function App() {
     ]);
   };
 
+  const clearLineProductionData = (lineId: LineId) => {
+    setLineConfigs((prev) => {
+      const current = prev[lineId];
+      if (!current) return prev;
+      return {
+        ...prev,
+        [lineId]: {
+          ...current,
+          cTotal: 0,
+          cUsed: 0,
+          cPrevUsed: 0,
+          fProduced: 0,
+          fPrevProduced: 0,
+          batchNo: "",
+          futureRolls: [],
+          completedRolls: [],
+          rolls: [],
+        },
+      };
+    });
+    setActiveSplicing((prev) => prev.filter((task) => task.line !== lineId));
+    setForecastBatches((prev) => ({ ...prev, [lineId]: "" }));
+    setForecastLengths((prev) => ({ ...prev, [lineId]: "" }));
+    setRollCompletionInputs((prev) => ({ ...prev, [lineId]: "" }));
+    setRollCompletionTimeInputs((prev) => ({ ...prev, [lineId]: "" }));
+    setRollTargetDrafts((prev) =>
+      Object.fromEntries(
+        Object.entries(prev).filter(([key]) => !key.startsWith(`${lineId}:`)),
+      ),
+    );
+  };
+
   const ensureAlarmAudioReady = () => {
     const AudioCtor =
       window.AudioContext ||
@@ -4186,7 +4218,20 @@ export default function App() {
   ) => {
     const conf = currentLineConfigs[lineId];
     let L = getCurrentCorrosionRemaining(conf);
-    if (L <= 0 && (!conf.futureRolls || conf.futureRolls.length === 0)) return currentLineConfigs;
+    if (L <= 0 && (!conf.futureRolls || conf.futureRolls.length === 0)) {
+      const nextConfigs = {
+        ...currentLineConfigs,
+        [lineId]: { ...conf, rolls: [] },
+      };
+      setLineConfigs(nextConfigs);
+      setActiveSplicing((prev) => prev.filter((task) => task.line !== lineId));
+      setRollTargetDrafts((prev) =>
+        Object.fromEntries(
+          Object.entries(prev).filter(([key]) => !key.startsWith(`${lineId}:`)),
+        ),
+      );
+      return nextConfigs;
+    }
     const avg = lineId === "25" ? 550 : 475;
     const minL = lineId === "25" ? 300 : 400;
     const maxL = lineId === "25" ? 800 : 550;
@@ -5770,15 +5815,30 @@ export default function App() {
                                   <input
                                     type="number"
                                     value={lineConfigs[selectedLine].cTotal || ""}
-                                    onChange={(e) =>
+                                    onChange={(e) => {
+                                      const rawValue = e.target.value.trim();
+                                      const nextTotal = Number(rawValue);
+                                      if (rawValue === "" || !Number.isFinite(nextTotal) || nextTotal <= 0) {
+                                        clearLineProductionData(selectedLine);
+                                        return;
+                                      }
                                       setLineConfigs((p) => ({
                                         ...p,
                                         [selectedLine]: {
                                           ...p[selectedLine],
-                                          cTotal: Number(e.target.value),
+                                          cTotal: nextTotal,
+                                          cUsed: Math.min(p[selectedLine].cUsed || 0, nextTotal),
+                                          cPrevUsed: Math.min(p[selectedLine].cPrevUsed || 0, nextTotal),
+                                          rolls: [],
                                         },
-                                      }))
-                                    }
+                                      }));
+                                      setActiveSplicing((prev) => prev.filter((task) => task.line !== selectedLine));
+                                      setRollTargetDrafts((prev) =>
+                                        Object.fromEntries(
+                                          Object.entries(prev).filter(([key]) => !key.startsWith(`${selectedLine}:`)),
+                                        ),
+                                      );
+                                    }}
                                     className="bg-transparent border-b border-dashed border-slate-600 text-blue-200 text-xs w-16 text-center focus:outline-none font-mono font-bold"
                                   />
                                 </div>
