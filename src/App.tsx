@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
+import { createPortal } from "react-dom";
 import AdminDashboard from "./AdminDashboard";
 import { SettingsPage } from "./SettingsPage";
 import { useAuth } from "./AuthContext";
@@ -773,6 +774,7 @@ const DEFAULT_JOINT_STAGE_DEFINITIONS = [
   ["5F槽", 4],
   ["kp3槽", 1],
   ["馈电3槽", 1],
+  ["w3槽", 1, "joint-stage-17a"],
   ["6f1槽", 4],
   ["6F2槽", 4],
   ["w4槽", 1],
@@ -781,7 +783,7 @@ const DEFAULT_JOINT_STAGE_DEFINITIONS = [
   ["炉1", 2],
   ["6f3槽", 2],
   ["w7槽", 1],
-  ["磷酸2槽", 4],
+  ["磷酸2槽", 3],
   ["w8槽", 2],
   ["6f4槽", 2],
   ["w9槽", 1],
@@ -838,14 +840,18 @@ const DEFAULT_JOINT_STAGE_WEIGHT = DEFAULT_JOINT_STAGE_DEFINITIONS.reduce(
   0,
 );
 
-const DEFAULT_JOINT_SLOTS: JointSlotConfig[] = DEFAULT_JOINT_STAGE_DEFINITIONS.map(
-  ([name, uCount], index) => ({
-    id: `joint-stage-${String(index + 1).padStart(2, "0")}`,
-    name,
-    length: Number(((240 * getDefaultJointStageWeight(name, uCount)) / DEFAULT_JOINT_STAGE_WEIGHT).toFixed(4)),
-    uCount,
-  }),
-);
+const DEFAULT_JOINT_SLOTS: JointSlotConfig[] = (() => {
+  let legacyStageNumber = 0;
+  return DEFAULT_JOINT_STAGE_DEFINITIONS.map(([name, uCount, customId]) => {
+    if (!customId) legacyStageNumber += 1;
+    return {
+      id: customId || `joint-stage-${String(legacyStageNumber).padStart(2, "0")}`,
+      name,
+      length: Number(((240 * getDefaultJointStageWeight(name, uCount)) / DEFAULT_JOINT_STAGE_WEIGHT).toFixed(4)),
+      uCount,
+    };
+  });
+})();
 
 // 生产线实测默认位置，车速 1.34 m/min；键格式为“阶段ID:U序号”，无 U 阶段使用 0。
 const DEFAULT_JOINT_CALIBRATION_POSITIONS: Record<string, number> = {
@@ -900,12 +906,39 @@ function isLegacyDefaultJointSlots(raw?: JointSlotConfig[]) {
   );
 }
 
+function applyJointSlotCorrections(source: JointSlotConfig[]) {
+  const hasPlantStageLayout = source.some((slot) =>
+    ["馈电3槽", "磷酸2槽", "6f1槽"].includes(String(slot.name || "")),
+  );
+  if (!hasPlantStageLayout) return source;
+
+  const defaultByName = new Map(DEFAULT_JOINT_SLOTS.map((slot) => [slot.name, slot]));
+  const corrected = source.map((slot) => {
+    if (slot.name !== "磷酸2槽") return slot;
+    const defaultSlot = defaultByName.get("磷酸2槽");
+    return {
+      ...slot,
+      length: defaultSlot?.length ?? slot.length,
+      uCount: 3,
+    };
+  });
+
+  const hasW3Slot = corrected.some((slot) => slot.name === "w3槽");
+  const feeder3Index = corrected.findIndex((slot) => slot.name === "馈电3槽");
+  const defaultW3Slot = defaultByName.get("w3槽");
+  if (!hasW3Slot && feeder3Index >= 0 && defaultW3Slot) {
+    corrected.splice(feeder3Index + 1, 0, { ...defaultW3Slot });
+  }
+
+  return corrected;
+}
+
 function normalizeJointSlots(raw?: JointSlotConfig[]) {
   const source =
     Array.isArray(raw) && raw.length > 0 && !isLegacyDefaultJointSlots(raw)
       ? raw
       : DEFAULT_JOINT_SLOTS;
-  return source.map((slot, index) => {
+  return applyJointSlotCorrections(source).map((slot, index) => {
     const rawUCount = Number(slot.uCount);
     const fallbackUCount = DEFAULT_JOINT_SLOTS[index]?.uCount ?? 1;
     const normalizedUCount = Math.max(
@@ -1737,27 +1770,24 @@ function CombinedPlanTimeline({
             });
 
             return (
-              <div key={lineId} className="flex flex-col group relative w-full mb-16 sm:mb-20">
+              <div key={lineId} className="flex flex-col group relative w-full mb-12 sm:mb-14">
                 <div className="flex items-center gap-1.5 mb-1.5 sticky left-0 z-20 w-fit mix-blend-multiply">
                   <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
                   <span className="font-black text-slate-800 text-xs sm:text-sm">{lineId}# 线</span>
                 </div>
-                <div className="relative h-10 sm:h-12 rounded-lg border border-slate-200 shadow-sm bg-white">
-                  <div className="absolute inset-0 overflow-hidden rounded-lg"></div>
-                  <div className="relative h-full w-full pointer-events-auto transition-opacity z-10">
-                    <DraggableTimelineLine
-                      lineId={lineId}
-                      config={config}
-                      cumSum={cumSum}
-                      totalToForm={totalToForm}
-                      updateConfig={updateConfig}
-                      currentTime={currentTime}
-                      shiftStart={shiftStart}
-                      maxMinutes={timelineMinutes}
-                      shiftMinutes={shiftMinutes}
-                      currentShiftPct={CURRENT_SHIFT_TIMELINE_PCT}
-                    />
-                  </div>
+                <div className="relative rounded-lg border border-slate-200 shadow-sm bg-white">
+                  <DraggableTimelineLine
+                    lineId={lineId}
+                    config={config}
+                    cumSum={cumSum}
+                    totalToForm={totalToForm}
+                    updateConfig={updateConfig}
+                    currentTime={currentTime}
+                    shiftStart={shiftStart}
+                    maxMinutes={timelineMinutes}
+                    shiftMinutes={shiftMinutes}
+                    currentShiftPct={CURRENT_SHIFT_TIMELINE_PCT}
+                  />
                 </div>
               </div>
             );
@@ -2042,6 +2072,7 @@ function DraggableTimelineLine({
   const [deleteConfirmIdx, setDeleteConfirmIdx] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
   const [editTimeValue, setEditTimeValue] = useState("");
+  const [editorViewportAnchor, setEditorViewportAnchor] = useState({ left: 0, top: 0 });
   const [rangeFlashByIdx, setRangeFlashByIdx] = useState<Record<number, number>>({});
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const dragMovedRef = useRef(false);
@@ -2072,11 +2103,27 @@ function DraggableTimelineLine({
     );
   };
 
+  const updateEditorViewportAnchor = (anchorPct = editorAnchorPct) => {
+    if (!barRef.current || typeof window === "undefined") return;
+    const rect = barRef.current.getBoundingClientRect();
+    const panelHalfWidth = Math.min(160, Math.max(120, (window.innerWidth - 32) / 2));
+    const left = Math.min(
+      window.innerWidth - panelHalfWidth - 8,
+      Math.max(panelHalfWidth + 8, rect.left + (rect.width * anchorPct) / 100),
+    );
+    setEditorViewportAnchor({
+      left,
+      top: Math.max(8, rect.bottom + 12),
+    });
+  };
+
   const selectRollEditor = (rollIdx: number, anchorPct = 50) => {
     const roll = config.rolls[rollIdx];
     if (!roll) return;
+    const nextAnchorPct = Math.max(4, Math.min(96, anchorPct));
     setEditingRollIdx(rollIdx);
-    setEditorAnchorPct(Math.max(4, Math.min(96, anchorPct)));
+    setEditorAnchorPct(nextAnchorPct);
+    updateEditorViewportAnchor(nextAnchorPct);
     setDeleteConfirmIdx(null);
     setEditValue(Number(roll.targetFormedLength || 0).toFixed(1));
     setEditTimeValue(format(getRollEndTime(rollIdx), "HH:mm"));
@@ -2323,13 +2370,29 @@ function DraggableTimelineLine({
     currMinutesFromStart,
   ]);
 
+  const isEditorOpen =
+    editingRollIdx !== null && draggingIdx === null && Boolean(config.rolls[editingRollIdx]);
+
+  useEffect(() => {
+    if (!isEditorOpen) return;
+    const handlePositionUpdate = () => updateEditorViewportAnchor(editorAnchorPct);
+    handlePositionUpdate();
+    window.addEventListener("resize", handlePositionUpdate);
+    window.addEventListener("scroll", handlePositionUpdate, true);
+    return () => {
+      window.removeEventListener("resize", handlePositionUpdate);
+      window.removeEventListener("scroll", handlePositionUpdate, true);
+    };
+  }, [isEditorOpen, editorAnchorPct, config.rolls.length]);
+
   return (
-    <div
-      ref={barRef}
-      className="absolute inset-0 z-10 select-none rounded"
-      style={{ touchAction: "pan-y" }}
-      onClick={() => { setEditingRollIdx(null); setDeleteConfirmIdx(null); }}
-    >
+    <div className={cn("relative", isEditorOpen ? "z-[200]" : "z-10")}>
+      <div
+        ref={barRef}
+        className="relative z-10 h-10 select-none rounded sm:h-12"
+        style={{ touchAction: "pan-y" }}
+        onClick={() => { setEditingRollIdx(null); setDeleteConfirmIdx(null); }}
+      >
       {/* Render completed rolls first */}
       {getUnloadedCompletedRolls(config.completedRolls || []).map((cr: any, i: number) => {
         const endTime = new Date(cr.unrollTime);
@@ -2759,11 +2822,14 @@ function DraggableTimelineLine({
         );
       })}
 
-      {editingRollIdx !== null && draggingIdx === null && config.rolls[editingRollIdx] && (
+      </div>
+
+      {isEditorOpen && editingRollIdx !== null && config.rolls[editingRollIdx] && typeof document !== "undefined" && createPortal(
         <div
-          className="absolute top-full z-50 mt-3 rounded-xl border border-slate-200 bg-white p-3 shadow-xl"
+          className="fixed z-[9999] max-h-[calc(100vh-24px)] overflow-y-auto rounded-xl border border-slate-200 bg-white p-3 shadow-2xl"
           style={{
-            left: `min(max(${editorAnchorPct}%, 160px), calc(100% - 160px))`,
+            left: `${editorViewportAnchor.left}px`,
+            top: `${editorViewportAnchor.top}px`,
             width: "min(320px, calc(100vw - 32px))",
             transform: "translateX(-50%)",
           }}
@@ -2909,7 +2975,8 @@ function DraggableTimelineLine({
               </div>
             );
           })()}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -4095,51 +4162,6 @@ export default function App() {
           : task,
       ),
     );
-  };
-
-  const updateJointSlot = (
-    lineId: LineId,
-    slotId: string,
-    updates: Partial<JointSlotConfig>,
-  ) => {
-    setJointSlotConfigs((prev) => ({
-      ...prev,
-      [lineId]: normalizeJointSlots(
-        (prev[lineId] || []).map((slot) =>
-          slot.id === slotId ? { ...slot, ...updates } : slot,
-        ),
-      ),
-    }));
-  };
-
-  const addJointSlot = (lineId: LineId) => {
-    setJointSlotConfigs((prev) => ({
-      ...prev,
-      [lineId]: [
-        ...(prev[lineId] || []),
-        {
-          id: Math.random().toString(),
-          name: `新槽${(prev[lineId] || []).length + 1}`,
-          length: 10,
-          uCount: 1,
-        },
-      ],
-    }));
-  };
-
-  const removeJointSlot = (lineId: LineId, slotId: string) => {
-    setJointSlotConfigs((prev) => ({
-      ...prev,
-      [lineId]: normalizeJointSlots((prev[lineId] || []).filter((slot) => slot.id !== slotId)),
-    }));
-  };
-
-  const resetJointSlots = (lineId: LineId) => {
-    setJointSlotConfigs((prev) => ({
-      ...prev,
-      [lineId]: normalizeJointSlots(),
-    }));
-    setJointCalibrationMarks((prev) => ({ ...prev, [lineId]: [] }));
   };
 
   const markJointUPosition = (lineId: LineId, jointId: string, slotId: string, uIndex: number) => {
@@ -7107,7 +7129,7 @@ export default function App() {
           </div>
         ) : activePage === "joint_tracking" ? (
           <div className="bg-slate-950 text-slate-100 flex-1 overflow-auto p-4 sm:p-6 sm:rounded-3xl shadow-sm border border-slate-800">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5">
+            <div id="joint-tracking-page-top" className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5">
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => setActivePage("dashboard")}
@@ -7166,12 +7188,90 @@ export default function App() {
               ).length;
               const canLocateCurrentSlot =
                 activeJoint?.status === "追踪中" && Boolean(activeJoint.currentSlot?.id);
+              const currentJointMarkMap = new Map<string, JointCalibrationMark>(
+                (jointCalibrationMarks[selectedLine] || [])
+                  .filter((mark) => activeJoint && mark.jointId === activeJoint.id)
+                  .map((mark) => [`${mark.slotId}:${mark.uIndex}`, mark] as [string, JointCalibrationMark]),
+              );
+              const formatJointPointTime = (time: Date, includeSeconds = false) => {
+                if (Number.isNaN(time.getTime())) return "--";
+                const sameDay = format(time, "yyyy-MM-dd") === format(currentTime, "yyyy-MM-dd");
+                if (sameDay) return format(time, includeSeconds ? "HH:mm:ss" : "HH:mm");
+                return format(time, includeSeconds ? "MM-dd HH:mm:ss" : "MM-dd HH:mm");
+              };
+              const getJointPointArrivalInfo = (point?: (typeof calibratedPoints)[number]) => {
+                if (!point) return null;
+                const mark = currentJointMarkMap.get(point.key);
+                if (mark?.markedAt) {
+                  const markedAt = new Date(mark.markedAt);
+                  if (!Number.isNaN(markedAt.getTime())) {
+                    return {
+                      label: "到达",
+                      value: formatJointPointTime(markedAt, true),
+                      tone: "manual" as const,
+                    };
+                  }
+                }
+                if (!activeJoint) return null;
+
+                const pointPosition = Math.max(0, Math.min(240, Number(point.position || 0)));
+                const currentDistance = Math.max(0, Math.min(240, Number(activeJoint.clampedDistance || 0)));
+                const hasNotEntered = currentTime.getTime() < activeJoint.startTime.getTime();
+                const isFuturePoint = hasNotEntered || pointPosition >= currentDistance;
+                const arrivalTime = hasNotEntered
+                  ? addDistanceWithSpeed(
+                      activeJoint.startTime,
+                      pointPosition,
+                      lineConfigs[selectedLine],
+                      scheduleTime,
+                    )
+                  : isFuturePoint
+                    ? addDistanceWithSpeed(
+                        currentTime,
+                        pointPosition - currentDistance,
+                        lineConfigs[selectedLine],
+                        scheduleTime,
+                      )
+                    : subtractDistanceWithSpeed(
+                        currentTime,
+                        currentDistance - pointPosition,
+                        lineConfigs[selectedLine],
+                        scheduleTime,
+                      );
+
+                return {
+                  label: isFuturePoint ? "预计" : "估计",
+                  value: formatJointPointTime(arrivalTime),
+                  tone: isFuturePoint ? ("future" as const) : ("estimated" as const),
+                };
+              };
               const scrollToCurrentSlot = () => {
                 if (!activeJoint?.currentSlot?.id) return;
                 document
                   .getElementById(`joint-slot-card-${selectedLine}-${activeJoint.currentSlot.id}`)
                   ?.scrollIntoView({ behavior: "smooth", block: "center" });
               };
+              const scrollToJointSlot = (slotId?: string) => {
+                if (!slotId) return;
+                document
+                  .getElementById(`joint-slot-card-${selectedLine}-${slotId}`)
+                  ?.scrollIntoView({ behavior: "smooth", block: "center" });
+              };
+              const scrollToJointTrackingTop = () => {
+                document
+                  .getElementById("joint-tracking-page-top")
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" });
+              };
+              const furnaceQuickLinks = ["炉1", "炉2", "炉3"].map((name) => {
+                const point = calibratedPoints.find(
+                  (item) => item.slot.name === name && item.uIndex === 1,
+                );
+                return {
+                  name,
+                  slotId: point?.slot.id,
+                  arrivalInfo: getJointPointArrivalInfo(point),
+                };
+              });
 
               return (
                 <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)] gap-5">
@@ -7238,6 +7338,36 @@ export default function App() {
                             <MapPin size={16} />
                             一键到目前槽
                           </button>
+                          <div className="mt-2 grid grid-cols-3 gap-2">
+                            {furnaceQuickLinks.map((item) => (
+                              <button
+                                key={item.name}
+                                type="button"
+                                disabled={!item.slotId}
+                                onClick={() => scrollToJointSlot(item.slotId)}
+                                className={cn(
+                                  "rounded-xl border px-2 py-2 text-left active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40",
+                                  item.arrivalInfo?.tone === "manual"
+                                    ? "border-orange-500/40 bg-orange-500/10 text-orange-200"
+                                    : "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800",
+                                )}
+                              >
+                                <div className="text-xs font-black">{item.name}</div>
+                                <div className={cn(
+                                  "mt-0.5 truncate text-[10px] font-black",
+                                  item.arrivalInfo?.tone === "future"
+                                    ? "text-blue-300"
+                                    : item.arrivalInfo?.tone === "manual"
+                                      ? "text-orange-300"
+                                      : "text-slate-500",
+                                )}>
+                                  {item.arrivalInfo
+                                    ? `${item.arrivalInfo.label} ${item.arrivalInfo.value}`
+                                    : "--"}
+                                </div>
+                              </button>
+                            ))}
+                          </div>
                         </div>
                       )}
                     </section>
@@ -7253,18 +7383,18 @@ export default function App() {
                         <div className="flex gap-2">
                           <button
                             type="button"
+                            onClick={scrollToJointTrackingTop}
+                            className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-[10px] font-black text-slate-300 hover:bg-slate-800 flex items-center gap-1"
+                          >
+                            <ChevronRight size={12} className="-rotate-90" /> 回顶部
+                          </button>
+                          <button
+                            type="button"
                             disabled={!canLocateCurrentSlot}
                             onClick={scrollToCurrentSlot}
                             className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[10px] font-black text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 flex items-center gap-1"
                           >
                             <MapPin size={12} /> 目前槽
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setJointCalibrationMarks((prev) => ({ ...prev, [selectedLine]: [] }))}
-                            className="rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-[10px] font-black text-slate-300 hover:bg-slate-800"
-                          >
-                            清除手动校正
                           </button>
                         </div>
                       </div>
@@ -7295,10 +7425,7 @@ export default function App() {
                               {Array.from({ length: Math.max(1, slot.uCount) }, (_, idx) => {
                                 const uIndex = slot.uCount > 0 ? idx + 1 : 0;
                                 const point = calibratedPoints.find((item) => item.slot.id === slot.id && item.uIndex === uIndex);
-                                const markedTime =
-                                  point?.markedAt && !Number.isNaN(new Date(point.markedAt).getTime())
-                                    ? new Date(point.markedAt)
-                                    : null;
+                                const arrivalInfo = getJointPointArrivalInfo(point);
                                 const isCurrentU =
                                   activeJoint?.status === "追踪中" &&
                                   activeJoint.currentSlot?.id === slot.id &&
@@ -7315,7 +7442,7 @@ export default function App() {
                                         : "border-slate-800",
                                     )}
                                   >
-                                    <div className="flex items-center justify-between gap-2">
+                                    <div className="flex items-start justify-between gap-2">
                                       <div className="flex min-w-0 items-center gap-1">
                                         <span className="text-xs font-black text-slate-200">
                                           {getJointPointLabel(slot, uIndex)}
@@ -7326,22 +7453,29 @@ export default function App() {
                                           </span>
                                         )}
                                       </div>
-                                      <span className={cn(
-                                        "text-[10px] font-mono font-black",
-                                        point?.calibrated || point?.fromDefault
-                                          ? "text-emerald-300"
-                                          : "text-slate-500",
-                                      )}>
-                                        {point ? point.position.toFixed(1) : "--"}m
-                                      </span>
-                                    </div>
-                                    {markedTime && (
-                                      <div className="mt-1 text-[9px] font-bold text-slate-500">
-                                        标记 {format(markedTime, "yyyy-MM-dd") === format(currentTime, "yyyy-MM-dd")
-                                          ? format(markedTime, "HH:mm:ss")
-                                          : format(markedTime, "MM-dd HH:mm:ss")}
+                                      <div className="shrink-0 text-right leading-tight">
+                                        {arrivalInfo && (
+                                          <div className={cn(
+                                            "mb-0.5 text-[9px] font-black",
+                                            arrivalInfo.tone === "manual"
+                                              ? "text-orange-300"
+                                              : arrivalInfo.tone === "future"
+                                                ? "text-blue-300"
+                                                : "text-slate-500",
+                                          )}>
+                                            {arrivalInfo.label} {arrivalInfo.value}
+                                          </div>
+                                        )}
+                                        <span className={cn(
+                                          "text-[10px] font-mono font-black",
+                                          point?.calibrated || point?.fromDefault
+                                            ? "text-emerald-300"
+                                            : "text-slate-500",
+                                        )}>
+                                          {point ? point.position.toFixed(1) : "--"}m
+                                        </span>
                                       </div>
-                                    )}
+                                    </div>
                                     <div className="mt-2 grid grid-cols-2 gap-1">
                                       <button
                                         type="button"
@@ -7417,66 +7551,6 @@ export default function App() {
                           })}
                         </div>
                       )}
-                    </section>
-
-                    <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:p-5">
-                      <div className="flex items-center justify-between gap-3 mb-4">
-                        <div>
-                          <h3 className="text-sm font-black text-slate-100">槽名称和 U 数管理</h3>
-                          <p className="text-[11px] font-bold text-slate-500 mt-1">
-                            这里管理结构；三个炉固定使用“炉前、炉后”两个定位点。
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => resetJointSlots(selectedLine)}
-                          className="shrink-0 rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-[10px] font-black text-slate-300 hover:bg-slate-800"
-                        >
-                          恢复默认
-                        </button>
-                      </div>
-
-                      <div className="space-y-2">
-                        {normalizeJointSlots(jointSlotConfigs[selectedLine]).map((slot, index) => (
-                          <div key={slot.id} className="grid grid-cols-[auto_minmax(0,1fr)_58px_auto] gap-2 items-end rounded-xl bg-slate-950/60 border border-slate-800 p-2">
-                            <div className="pb-2 text-xs font-black text-slate-500">#{index + 1}</div>
-                            <label>
-                              <span className="block text-[9px] text-slate-500 font-bold mb-1">槽名</span>
-                              <input
-                                value={slot.name}
-                                onChange={(e) => updateJointSlot(selectedLine, slot.id, { name: e.target.value })}
-                                className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 font-bold outline-none focus:border-blue-400"
-                              />
-                            </label>
-                            <label>
-                              <span className="block text-[9px] text-slate-500 font-bold mb-1">U</span>
-                              <input
-                                type="number"
-                                min={isFurnaceJointSlot(slot) ? 2 : 0}
-                                value={slot.uCount}
-                                onChange={(e) => updateJointSlot(selectedLine, slot.id, { uCount: Number(e.target.value) })}
-                                className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 font-mono outline-none focus:border-blue-400"
-                              />
-                            </label>
-                            <button
-                              type="button"
-                              onClick={() => removeJointSlot(selectedLine, slot.id)}
-                              className="mb-0.5 rounded-lg bg-red-950/40 border border-red-500/30 p-2 text-red-300 hover:bg-red-600/80 hover:text-white"
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => addJointSlot(selectedLine)}
-                        className="mt-3 w-full rounded-lg bg-blue-600 hover:bg-blue-500 px-3 py-2 text-xs font-black text-white flex items-center justify-center gap-1.5"
-                      >
-                        <Plus size={14} />
-                        加槽
-                      </button>
                     </section>
                   </div>
                 </div>
