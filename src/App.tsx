@@ -4188,13 +4188,6 @@ export default function App() {
     }));
   };
 
-  const clearJointUPosition = (lineId: LineId, slotId: string, uIndex: number) => {
-    setJointCalibrationMarks((prev) => ({
-      ...prev,
-      [lineId]: (prev[lineId] || []).filter((mark) => !(mark.slotId === slotId && mark.uIndex === uIndex)),
-    }));
-  };
-
   // derived state for Splicing Tasks
   const updatedSplicingTasks = activeSplicing.map((task) => {
     const minElapsed = differenceInMinutes(currentTime, task.startTime);
@@ -7144,7 +7137,7 @@ export default function App() {
                 <div>
                   <h2 className="text-xl sm:text-2xl font-black">接头动态追踪</h2>
                   <p className="text-xs sm:text-sm font-bold text-slate-400 mt-1">
-                    从前处理槽 U4/U5 开始手动校正接头位置，再预测未来每分钟位置。
+                    从前处理槽 U4/U5 开始手动校正接头位置，再预测后续各槽到达时间。
                   </p>
                 </div>
               </div>
@@ -7215,9 +7208,13 @@ export default function App() {
                 if (!activeJoint) return null;
 
                 const pointPosition = Math.max(0, Math.min(240, Number(point.position || 0)));
-                const currentDistance = Math.max(0, Math.min(240, Number(activeJoint.clampedDistance || 0)));
                 const hasNotEntered = currentTime.getTime() < activeJoint.startTime.getTime();
-                const isFuturePoint = hasNotEntered || pointPosition >= currentDistance;
+                const hasExited = currentTime.getTime() > activeJoint.exitTime.getTime();
+                const referenceTime = hasExited ? activeJoint.exitTime : currentTime;
+                const referenceDistance = hasExited
+                  ? 240
+                  : Math.max(0, Math.min(240, Number(activeJoint.clampedDistance || 0)));
+                const isFuturePoint = hasNotEntered || (!hasExited && pointPosition >= referenceDistance);
                 const arrivalTime = hasNotEntered
                   ? addDistanceWithSpeed(
                       activeJoint.startTime,
@@ -7227,14 +7224,14 @@ export default function App() {
                     )
                   : isFuturePoint
                     ? addDistanceWithSpeed(
-                        currentTime,
-                        pointPosition - currentDistance,
+                        referenceTime,
+                        pointPosition - referenceDistance,
                         lineConfigs[selectedLine],
                         scheduleTime,
                       )
                     : subtractDistanceWithSpeed(
-                        currentTime,
-                        currentDistance - pointPosition,
+                        referenceTime,
+                        referenceDistance - pointPosition,
                         lineConfigs[selectedLine],
                         scheduleTime,
                       );
@@ -7262,6 +7259,11 @@ export default function App() {
                   .getElementById("joint-tracking-page-top")
                   ?.scrollIntoView({ behavior: "smooth", block: "start" });
               };
+              const scrollToJointOverview = () => {
+                document
+                  .getElementById(`joint-slot-overview-${selectedLine}`)
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" });
+              };
               const furnaceQuickLinks = ["炉1", "炉2", "炉3"].map((name) => {
                 const point = calibratedPoints.find(
                   (item) => item.slot.name === name && item.uIndex === 1,
@@ -7271,6 +7273,23 @@ export default function App() {
                   slotId: point?.slot.id,
                   arrivalInfo: getJointPointArrivalInfo(point),
                 };
+              });
+              const slotArrivalRows = normalizeJointSlots(jointSlotConfigs[selectedLine]).flatMap((slot) => {
+                const slotPoints = calibratedPoints
+                  .filter((point) => point.slot.id === slot.id)
+                  .sort((a, b) => a.position - b.position);
+                const entryPoint =
+                  slotPoints.find((point) => isFurnaceJointSlot(slot) && point.uIndex === 1) ||
+                  slotPoints[0];
+                const hasManualMark = slotPoints.some((point) =>
+                  currentJointMarkMap.has(point.key),
+                );
+                const arrivalInfo = getJointPointArrivalInfo(entryPoint);
+                if (hasManualMark || arrivalInfo?.tone !== "future") return [];
+                return [{
+                  slot,
+                  arrivalInfo,
+                }];
               });
 
               return (
@@ -7390,6 +7409,13 @@ export default function App() {
                           </button>
                           <button
                             type="button"
+                            onClick={scrollToJointOverview}
+                            className="rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-[10px] font-black text-blue-300 hover:bg-blue-500/20 flex items-center gap-1"
+                          >
+                            <ListTodo size={12} /> 总览
+                          </button>
+                          <button
+                            type="button"
                             disabled={!canLocateCurrentSlot}
                             onClick={scrollToCurrentSlot}
                             className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[10px] font-black text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 flex items-center gap-1"
@@ -7476,28 +7502,14 @@ export default function App() {
                                         </span>
                                       </div>
                                     </div>
-                                    <div className="mt-2 grid grid-cols-2 gap-1">
+                                    <div className="mt-2">
                                       <button
                                         type="button"
                                         disabled={!activeJoint || !canMarkPoint}
                                         onClick={() => activeJoint && markJointUPosition(selectedLine, activeJoint.id, slot.id, uIndex)}
-                                        className="rounded bg-orange-600 disabled:opacity-40 disabled:bg-slate-700 px-2 py-1.5 text-[10px] font-black text-white"
+                                        className="w-full rounded bg-orange-600 disabled:opacity-40 disabled:bg-slate-700 px-2 py-1.5 text-[10px] font-black text-white"
                                       >
                                         {canMarkPoint ? "标记到达" : "无需标记"}
-                                      </button>
-                                      <button
-                                        type="button"
-                                        disabled={!point?.calibrated}
-                                        onClick={() => clearJointUPosition(selectedLine, slot.id, uIndex)}
-                                        className="rounded bg-slate-800 px-2 py-1.5 text-[10px] font-black text-slate-300 disabled:opacity-45"
-                                      >
-                                        {point?.calibrated
-                                          ? point.hasDefaultPosition
-                                            ? "恢复默认"
-                                            : "清除"
-                                          : point?.fromDefault
-                                            ? "默认值"
-                                            : "清除"}
                                       </button>
                                     </div>
                                   </div>
@@ -7511,42 +7523,39 @@ export default function App() {
                   </div>
 
                   <div className="space-y-5">
-                    <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:p-5">
-                      <h3 className="text-sm font-black text-slate-100 mb-3">未来每分钟位置</h3>
+                    <section
+                      id={`joint-slot-overview-${selectedLine}`}
+                      className="scroll-mt-24 rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:p-5"
+                    >
+                      <h3 className="text-sm font-black text-slate-100 mb-3">各槽到达预期</h3>
                       {!activeJoint ? (
                         <div className="rounded-xl border border-dashed border-slate-700 p-5 text-center text-xs font-bold text-slate-500">
                           暂无可预测接头。
                         </div>
                       ) : (
                         <div className="space-y-2 max-h-[420px] overflow-auto pr-1">
-                          {Array.from({ length: 31 }, (_, minute) => {
-                            const futureTime = addMinutes(currentTime, minute);
-                            const distance =
-                              activeJoint.clampedDistance +
-                              distanceBetweenWithSpeed(currentTime, futureTime, lineConfigs[selectedLine], scheduleTime);
-                            const location = getCalibratedLocationForLine(selectedLine, distance);
-                            const isOut = distance > 240;
+                          {slotArrivalRows.length === 0 && (
+                            <div className="rounded-xl border border-dashed border-slate-700 p-5 text-center text-xs font-bold text-slate-500">
+                              后续没有未到达的槽。
+                            </div>
+                          )}
+                          {slotArrivalRows.map(({ slot, arrivalInfo }) => {
                             return (
-                              <div key={minute} className="grid grid-cols-[56px_minmax(0,1fr)_64px] gap-2 items-center rounded-lg bg-slate-950/60 border border-slate-800 px-3 py-2">
-                                <div className="font-mono text-xs font-black text-blue-300">
-                                  {format(futureTime, "HH:mm")}
+                              <button
+                                key={slot.id}
+                                type="button"
+                                onClick={() => scrollToJointSlot(slot.id)}
+                                className={cn(
+                                  "flex w-full items-center justify-between gap-3 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-left active:scale-[0.99]",
+                                )}
+                              >
+                                <span className="min-w-0 truncate text-xs font-black text-slate-200">
+                                  {slot.name}
+                                </span>
+                                <div className="shrink-0 font-mono text-xs font-black text-blue-300">
+                                  预计 {arrivalInfo.value}
                                 </div>
-                                <div className="min-w-0">
-                                  <div className="truncate text-xs font-black text-slate-200">
-                                    {isOut
-                                      ? "已出生产线"
-                                      : location
-                                        ? `${location.slot.name}${location.uIndex > 0 ? ` · ${getJointPointLabel(location.slot, location.uIndex)}` : ""}`
-                                        : "未知阶段"}
-                                  </div>
-                                  <div className="text-[10px] font-bold text-slate-500">
-                                    {minute === 0 ? "当前" : `${minute} 分钟后`}
-                                  </div>
-                                </div>
-                                <div className="text-right font-mono text-xs font-black text-slate-400">
-                                  {Math.min(240, distance).toFixed(1)}m
-                                </div>
-                              </div>
+                              </button>
                             );
                           })}
                         </div>
