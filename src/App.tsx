@@ -232,6 +232,22 @@ const SHIFT_CYCLE_LABELS = [
   "休息第2天",
 ] as const;
 
+type CrewLabel = "甲" | "乙" | "丙";
+type ShiftSlotType = "Day" | "Night";
+
+const MY_CREW_LABEL: CrewLabel = "乙";
+const CREW_BY_OWN_CYCLE_DAY: Record<
+  ShiftCycleDay,
+  Record<ShiftSlotType, CrewLabel>
+> = {
+  0: { Day: "乙", Night: "丙" },
+  1: { Day: "乙", Night: "丙" },
+  2: { Day: "甲", Night: "乙" },
+  3: { Day: "甲", Night: "乙" },
+  4: { Day: "丙", Night: "甲" },
+  5: { Day: "丙", Night: "甲" },
+};
+
 function normalizeShiftCycleDay(value: unknown): ShiftCycleDay {
   const numberValue = Number(value);
   return [0, 1, 2, 3, 4, 5].includes(numberValue)
@@ -303,11 +319,23 @@ function getShiftInfo(date: Date, settings = loadRosterSettings()) {
   };
 }
 
-function getShiftOwnershipLabel(date: Date, settings?: RosterSettings) {
-  const info = getShiftInfo(date, settings);
-  if (info.type === "Day") return "我的白班";
-  if (info.type === "Night") return "我的夜班";
-  return "我的休息";
+function getShiftSlotInfo(shiftStart: Date, settings = loadRosterSettings()) {
+  const normalizedStart = getCurrentShiftStart(shiftStart);
+  const slotType: ShiftSlotType =
+    normalizedStart.getHours() === 8 ? "Day" : "Night";
+  const dateInfo = getShiftInfo(startOfDay(normalizedStart), settings);
+  const crew = CREW_BY_OWN_CYCLE_DAY[dateInfo.cycleDay][slotType];
+  const isMine = crew === MY_CREW_LABEL;
+  const cnType = slotType === "Day" ? "白班" : "夜班";
+
+  return {
+    type: slotType,
+    crew,
+    isMine,
+    label: isMine ? `我的${cnType}` : `${crew}${cnType}`,
+    name: slotType === "Day" ? "白班 Day" : "夜班 Night",
+    timeStr: slotType === "Day" ? "08:00 - 20:00" : "20:00 - 08:00",
+  };
 }
 
 // --- Shift Logic for Punches ---
@@ -1701,6 +1729,7 @@ function CombinedPlanTimeline({
               {shiftSpanTicks.map((minuteFromStart) => {
                 const segmentStart = addMinutes(shiftStart, minuteFromStart);
                 const segmentEnd = addMinutes(segmentStart, shiftMinutes);
+                const segmentShift = getShiftSlotInfo(segmentStart, rosterSettings);
                 const centerPct =
                   getTimelineVisualPct(
                     minuteFromStart + shiftMinutes / 2,
@@ -1716,7 +1745,7 @@ function CombinedPlanTimeline({
                     <span className="whitespace-nowrap text-[9px] font-black text-slate-500 sm:text-[10px]">
                       {format(segmentStart, "MM-dd")}
                       <span className="ml-1 text-blue-600">
-                        {getShiftOwnershipLabel(segmentStart, rosterSettings)}
+                        {segmentShift.label}
                       </span>
                     </span>
                     <span className="mt-0.5 whitespace-nowrap text-[8px] font-bold text-slate-400 sm:text-[9px]">
@@ -7663,12 +7692,12 @@ export default function App() {
                   <div className="text-sm font-bold text-slate-500 mt-0.5">
                     {(() => {
                       const planShiftStart = getCurrentShiftStart(scheduleTime);
-                      const planShiftInfo = getShiftInfo(planShiftStart, rosterSettings);
+                      const planShiftInfo = getShiftSlotInfo(planShiftStart, rosterSettings);
                       return (
                         <>
                           {format(planShiftStart, "yyyy年MM月dd日")}
                           <span className="ml-2 rounded bg-blue-50 px-1.5 py-0.5 text-[11px] font-black text-blue-600">
-                            {getShiftOwnershipLabel(planShiftStart, rosterSettings)}
+                            {planShiftInfo.label}
                           </span>
                           <span className="ml-1">
                             · {planShiftInfo.name} ({planShiftInfo.timeStr})
