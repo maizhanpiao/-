@@ -14,6 +14,15 @@ type RollRecord = {
   currentLength: number | ""; // 当前米数(m)
 };
 
+type LineSpeedPlan = {
+  speed: number;
+  speedSegments?: Array<{
+    id?: string;
+    startTime: string;
+    speed: number;
+  }>;
+};
+
 function createEmptyRecords(lines: string[]) {
   return lines.reduce<Record<string, RollRecord[]>>((acc, line) => {
     acc[line] = [];
@@ -43,15 +52,39 @@ function writeLocalWithBackup(key: string, value: string) {
   localStorage.setItem(`${key}${LOCAL_BACKUP_SUFFIX}`, value);
 }
 
+const SHIFT_DURATION_MINUTES = 12 * 60;
+const MINUTES_PER_DAY = 24 * 60;
+
+function parseClockMinutes(value: string) {
+  const [hoursRaw, minutesRaw] = String(value || "").split(":").map(Number);
+  if (!Number.isFinite(hoursRaw) || !Number.isFinite(minutesRaw)) return null;
+  return hoursRaw * 60 + minutesRaw;
+}
+
+function getShiftStartTimeFromEnd(shiftEndTime: "20:00" | "08:00") {
+  return shiftEndTime === "20:00" ? "08:00" : "20:00";
+}
+
+function getMinutesFromShiftStart(clockTime: string, shiftStartTime: string) {
+  const clockMinutes = parseClockMinutes(clockTime);
+  const shiftStartMinutes = parseClockMinutes(shiftStartTime);
+  if (clockMinutes === null || shiftStartMinutes === null) return null;
+  let offset = clockMinutes - shiftStartMinutes;
+  if (offset < 0) offset += MINUTES_PER_DAY;
+  return offset;
+}
+
 export default function DailyRecordPage({
   setActivePage,
   lines,
   defaultSpeeds = {},
+  lineSpeedPlans = {},
   storageKey = "daily_records_data",
 }: {
   setActivePage: (page: any) => void;
   lines: string[];
   defaultSpeeds?: Record<string, number>;
+  lineSpeedPlans?: Record<string, LineSpeedPlan>;
   storageKey?: string;
 }) {
   const shiftStorageKey = `${storageKey}_shift`;
@@ -103,6 +136,109 @@ export default function DailyRecordPage({
   const getDefaultSpeed = (lineId: string) => {
     const speed = Number(defaultSpeeds[lineId]);
     return Number.isFinite(speed) && speed > 0 ? speed : "";
+  };
+
+  const getLineSpeedPlan = (lineId: string): LineSpeedPlan => {
+    const plan = lineSpeedPlans[lineId];
+    const fallbackSpeed = Number(getDefaultSpeed(lineId));
+    const speed = Number(plan?.speed);
+    return {
+      speed: Number.isFinite(speed) && speed > 0
+        ? speed
+        : Number.isFinite(fallbackSpeed) && fallbackSpeed > 0
+          ? fallbackSpeed
+          : 0,
+      speedSegments: Array.isArray(plan?.speedSegments) ? plan.speedSegments : [],
+    };
+  };
+
+  const getShiftSpeedSchedule = (lineId: string) => {
+    const shiftStartTime = getShiftStartTimeFromEnd(shiftEndTime);
+    const plan = getLineSpeedPlan(lineId);
+    const baseSpeed = Number(plan.speed);
+    if (!Number.isFinite(baseSpeed) || baseSpeed <= 0) return [];
+
+    const schedule = [
+      {
+        id: "base",
+        offset: 0,
+        startTime: shiftStartTime,
+        speed: baseSpeed,
+      },
+      ...(plan.speedSegments || [])
+        .map((segment) => {
+          const offset = getMinutesFromShiftStart(segment.startTime, shiftStartTime);
+          const speed = Number(segment.speed);
+          if (
+            offset === null ||
+            offset < 0 ||
+            offset >= SHIFT_DURATION_MINUTES ||
+            !Number.isFinite(speed) ||
+            speed <= 0
+          ) {
+            return null;
+          }
+          return {
+            id: segment.id || `${segment.startTime}-${speed}`,
+            offset,
+            startTime: segment.startTime,
+            speed,
+          };
+        })
+        .filter(Boolean) as Array<{
+          id: string;
+          offset: number;
+          startTime: string;
+          speed: number;
+        }>,
+    ].sort((a, b) => a.offset - b.offset);
+
+    return schedule;
+  };
+
+  const calculateTheoreticalShiftLength = (lineId: string) => {
+    const schedule = getShiftSpeedSchedule(lineId);
+    if (schedule.length === 0) return null;
+    return schedule.reduce((total, segment, index) => {
+      const nextOffset = schedule[index + 1]?.offset ?? SHIFT_DURATION_MINUTES;
+      const minutes = Math.max(0, nextOffset - segment.offset);
+      return total + minutes * segment.speed;
+    }, 0);
+  };
+
+  const hasCompletedFinalRoll = (lineId: string) => {
+    const lineRecords = getLineRecords(lineId);
+    const finalIndex = lineRecords.length - 1;
+    const finalRoll = finalIndex >= 0 ? lineRecords[finalIndex] : null;
+    return Boolean(
+      finalRoll?.isLastRoll &&
+      getOwnLength(lineId, finalRoll, finalIndex) > 0,
+    );
+  };
+
+  const getProductionAudit = (lineId: string) => {
+    const theoretical = calculateTheoreticalShiftLength(lineId);
+    const actual = calculateOwnTotalLength(lineId);
+    const hasRecordLength = getLineRecords(lineId).some((roll, index) => getOwnLength(lineId, roll, index) > 0);
+    const hasFinalRoll = hasCompletedFinalRoll(lineId);
+    const diff = theoretical === null ? null : actual - theoretical;
+    const absDiff = diff === null ? 0 : Math.abs(diff);
+    const tone = !hasFinalRoll || !hasRecordLength || diff === null
+      ? "empty"
+      : absDiff <= 10
+        ? "ok"
+        : absDiff <= 20
+          ? "warn"
+          : "bad";
+
+    return {
+      actual,
+      theoretical,
+      diff,
+      hasRecordLength,
+      hasFinalRoll,
+      tone,
+    };
   };
 
   const getOwnLength = (lineId: string, roll: RollRecord, index: number) => {
@@ -264,17 +400,86 @@ export default function DailyRecordPage({
             key={lineId}
             className="bg-white border text-left border-slate-200 rounded-2xl p-4 shadow-sm"
           >
-            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-              <div className="flex items-center gap-2">
-                <span className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-700 font-black text-sm flex items-center justify-center">
-                  {lineId}#
-                </span>
-                <span className="font-bold text-slate-700">产线记录</span>
-              </div>
-              <span className="text-sm font-bold text-amber-600 bg-amber-50 px-2.5 py-1 rounded-md">
-                我产合计: {calculateOwnTotalLength(lineId).toFixed(1)} m
-              </span>
-            </div>
+            {(() => {
+              const audit = getProductionAudit(lineId);
+              const shiftStartTime = getShiftStartTimeFromEnd(shiftEndTime);
+              return (
+                <>
+                  <div className="flex items-center justify-between mb-3 border-b border-slate-100 pb-3">
+                    <div className="flex items-center gap-2">
+                      <span className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-700 font-black text-sm flex items-center justify-center">
+                        {lineId}#
+                      </span>
+                      <span className="font-bold text-slate-700">产线记录</span>
+                    </div>
+                    <span className="text-sm font-bold text-amber-600 bg-amber-50 px-2.5 py-1 rounded-md">
+                      我产合计: {audit.actual.toFixed(1)} m
+                    </span>
+                  </div>
+
+                  {audit.hasFinalRoll && (
+                    <div
+                      className={cn(
+                        "mb-4 rounded-xl border p-3",
+                        audit.tone === "bad"
+                          ? "border-red-200 bg-red-50"
+                          : audit.tone === "warn"
+                            ? "border-amber-200 bg-amber-50"
+                            : audit.tone === "ok"
+                              ? "border-emerald-200 bg-emerald-50"
+                              : "border-slate-200 bg-slate-50",
+                      )}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 text-xs font-black text-slate-700">
+                          <Divide size={14} />
+                          班次产量核对
+                        </div>
+                        <span className="text-[10px] font-bold text-slate-500">
+                          {shiftStartTime}-{shiftEndTime}
+                        </span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-3 gap-2 text-center">
+                        <div className="rounded-lg bg-white/70 px-2 py-2">
+                          <div className="text-[10px] font-bold text-slate-500">理论</div>
+                          <div className="mt-0.5 text-sm font-black text-slate-800">
+                            {audit.theoretical === null ? "--" : `${audit.theoretical.toFixed(1)}m`}
+                          </div>
+                        </div>
+                        <div className="rounded-lg bg-white/70 px-2 py-2">
+                          <div className="text-[10px] font-bold text-slate-500">实际</div>
+                          <div className="mt-0.5 text-sm font-black text-indigo-700">
+                            {audit.hasRecordLength ? `${audit.actual.toFixed(1)}m` : "--"}
+                          </div>
+                        </div>
+                        <div className="rounded-lg bg-white/70 px-2 py-2">
+                          <div className="text-[10px] font-bold text-slate-500">偏差</div>
+                          <div
+                            className={cn(
+                              "mt-0.5 text-sm font-black",
+                              audit.tone === "bad"
+                                ? "text-red-700"
+                                : audit.tone === "warn"
+                                  ? "text-amber-700"
+                                  : audit.tone === "ok"
+                                    ? "text-emerald-700"
+                                    : "text-slate-400",
+                            )}
+                          >
+                            {audit.diff === null || !audit.hasRecordLength
+                              ? "--"
+                              : `${audit.diff >= 0 ? "+" : ""}${audit.diff.toFixed(1)}m`}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="mt-2 text-[10px] font-bold text-slate-500">
+                        按工作台车速段计算理论米数；偏差超过 10m 会变色提醒。
+                      </div>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
 
             <div className="space-y-3">
              <div className="hidden sm:grid grid-cols-[1.5fr_0.8fr_1fr_1fr_auto] gap-2 px-2 text-xs font-bold text-slate-400">

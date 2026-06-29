@@ -755,6 +755,7 @@ interface JointCalibrationMark {
 }
 
 const JOINT_POSITION_DATA_REVISION = 2;
+const JOINT_MARK_CLEAR_HOLD_MS = 3000;
 
 const DEFAULT_JOINT_STAGE_DEFINITIONS = [
   ["对接槽", 0],
@@ -3397,6 +3398,9 @@ export default function App() {
   const [jointCalibrationMarks, setJointCalibrationMarks] = useState<Record<LineId, JointCalibrationMark[]>>(() =>
     createJointCalibrationMap(lineAssignments),
   );
+  const [jointMarkClearHold, setJointMarkClearHold] = useState<{ key: string; progress: number } | null>(null);
+  const jointMarkClearTimerRef = useRef<number | null>(null);
+  const jointMarkClearIntervalRef = useRef<number | null>(null);
   const [lineMeterReadings, setLineMeterReadings] = useState<Record<LineId, LineMeterReading>>(() =>
     createLineMeterMap(lineAssignments),
   );
@@ -3464,6 +3468,26 @@ export default function App() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastWorkbenchMeterSpeedsRef = useRef<Record<LineId, number>>({});
   const lineMeterReadingsRef = useRef<Record<LineId, LineMeterReading>>({});
+
+  const clearJointMarkHoldTimers = () => {
+    if (jointMarkClearTimerRef.current !== null) {
+      window.clearTimeout(jointMarkClearTimerRef.current);
+      jointMarkClearTimerRef.current = null;
+    }
+    if (jointMarkClearIntervalRef.current !== null) {
+      window.clearInterval(jointMarkClearIntervalRef.current);
+      jointMarkClearIntervalRef.current = null;
+    }
+  };
+
+  const cancelJointMarkClearHold = () => {
+    clearJointMarkHoldTimers();
+    setJointMarkClearHold(null);
+  };
+
+  useEffect(() => () => {
+    clearJointMarkHoldTimers();
+  }, []);
 
   const syncLineMeterSpeedFromWorkbench = (lineId: LineId, speed: number) => {
     if (!appUser || !Number.isFinite(speed) || speed < 0) return;
@@ -4165,6 +4189,7 @@ export default function App() {
   };
 
   const markJointUPosition = (lineId: LineId, jointId: string, slotId: string, uIndex: number) => {
+    cancelJointMarkClearHold();
     const joint = getJointTrackingForLine(lineId).find((item) => item.id === jointId);
     const targetPoint = getCalibratedUPointsForLine(lineId).find(
       (point) => point.slot.id === slotId && point.uIndex === uIndex,
@@ -4186,6 +4211,35 @@ export default function App() {
         nextMark,
       ],
     }));
+  };
+
+  const clearJointUPositionMark = (lineId: LineId, jointId: string, slotId: string, uIndex: number) => {
+    setJointCalibrationMarks((prev) => ({
+      ...prev,
+      [lineId]: (prev[lineId] || []).filter((mark) => !(
+        mark.slotId === slotId &&
+        mark.uIndex === uIndex &&
+        mark.jointId === jointId
+      )),
+    }));
+  };
+
+  const startJointMarkClearHold = (lineId: LineId, jointId: string, slotId: string, uIndex: number) => {
+    const holdKey = `${lineId}:${jointId}:${slotId}:${uIndex}`;
+    const startedAt = Date.now();
+    cancelJointMarkClearHold();
+    setJointMarkClearHold({ key: holdKey, progress: 0 });
+
+    jointMarkClearIntervalRef.current = window.setInterval(() => {
+      const progress = Math.min(0.98, (Date.now() - startedAt) / JOINT_MARK_CLEAR_HOLD_MS);
+      setJointMarkClearHold({ key: holdKey, progress });
+    }, 80);
+
+    jointMarkClearTimerRef.current = window.setTimeout(() => {
+      clearJointMarkHoldTimers();
+      clearJointUPositionMark(lineId, jointId, slotId, uIndex);
+      setJointMarkClearHold(null);
+    }, JOINT_MARK_CLEAR_HOLD_MS);
   };
 
   // derived state for Splicing Tasks
@@ -4784,44 +4838,6 @@ export default function App() {
         ? "首次校对完成"
         : `校对完成，修正 ${correction >= 0 ? "+" : ""}${correction.toFixed(2)}m`;
       setLineMeterMessages((prev) => ({ ...prev, [lineId]: successMessage }));
-    } catch {
-      setLineMeterMessages((prev) => ({ ...prev, [lineId]: "保存失败，请检查本地空间" }));
-    }
-  };
-
-  const handleAdjustLineMeterSpeed = (lineId: LineId) => {
-    const normalizedSpeed = String(lineMeterSpeedInputs[lineId] || "").trim().replace(",", ".");
-    const speed = Number(normalizedSpeed);
-    if (!normalizedSpeed || !Number.isFinite(speed) || speed < 0) {
-      setLineMeterMessages((prev) => ({ ...prev, [lineId]: "请输入有效车速" }));
-      return;
-    }
-
-    const reading = lineMeterReadings[lineId];
-    const now = new Date();
-    const liveValue = reading ? getLiveLineMeterValue(reading, now) : null;
-    if (liveValue === null) {
-      setLineMeterMessages((prev) => ({ ...prev, [lineId]: "请先同步真实米数" }));
-      return;
-    }
-
-    const nextReadings = {
-      ...lineMeterReadings,
-      [lineId]: {
-        value: Number(liveValue.toFixed(6)),
-        speed: Number(speed.toFixed(3)),
-        updatedAt: now.toISOString(),
-      },
-    };
-    try {
-      writeLocalStorageWithBackup(
-        getRealtimeMeterStorageKey(appUser.username),
-        JSON.stringify(nextReadings),
-      );
-      setLineMeterReadings(nextReadings);
-      setLineMeterInputs((prev) => ({ ...prev, [lineId]: liveValue.toFixed(2) }));
-      setLineMeterSpeedInputs((prev) => ({ ...prev, [lineId]: String(nextReadings[lineId].speed) }));
-      setLineMeterMessages((prev) => ({ ...prev, [lineId]: "车速已调整" }));
     } catch {
       setLineMeterMessages((prev) => ({ ...prev, [lineId]: "保存失败，请检查本地空间" }));
     }
@@ -7079,11 +7095,11 @@ export default function App() {
                             </div>
                           </label>
                         </div>
-                        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+                        <div className="mt-3">
                           <button
                             type="submit"
                             className={cn(
-                              "rounded-lg px-3 py-3 text-sm font-black text-white active:scale-95",
+                              "w-full rounded-lg px-3 py-3 text-sm font-black text-white active:scale-95",
                               index === 0
                                 ? "bg-blue-600 hover:bg-blue-700"
                                 : index === 1
@@ -7093,19 +7109,11 @@ export default function App() {
                           >
                             按现场数据重新校对
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => handleAdjustLineMeterSpeed(lineId)}
-                            className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-slate-100 px-3 py-3 text-sm font-black text-slate-700 hover:bg-slate-200 active:scale-95"
-                          >
-                            <Gauge size={15} /> 仅调整车速
-                          </button>
                         </div>
                         <div
                           className={cn(
                             "mt-2 min-h-4 text-[11px] font-black",
                             lineMeterMessages[lineId]?.includes("校对完成") ||
-                            lineMeterMessages[lineId] === "车速已调整" ||
                             lineMeterMessages[lineId] === "已跟随工作台车速更新"
                               ? "text-emerald-600"
                               : "text-red-500",
@@ -7452,12 +7460,21 @@ export default function App() {
                                 const uIndex = slot.uCount > 0 ? idx + 1 : 0;
                                 const point = calibratedPoints.find((item) => item.slot.id === slot.id && item.uIndex === uIndex);
                                 const arrivalInfo = getJointPointArrivalInfo(point);
+                                const manualMark = point ? currentJointMarkMap.get(point.key) : null;
                                 const isCurrentU =
                                   activeJoint?.status === "追踪中" &&
                                   activeJoint.currentSlot?.id === slot.id &&
                                   activeJoint.currentU === uIndex;
                                 const isTrackingStartPoint = isInitialJointTrackingPoint(slot, uIndex);
                                 const canMarkPoint = canMarkJointTrackingPoint(slot, uIndex);
+                                const holdKey = activeJoint ? `${selectedLine}:${activeJoint.id}:${slot.id}:${uIndex}` : "";
+                                const clearHoldProgress = jointMarkClearHold?.key === holdKey
+                                  ? jointMarkClearHold.progress
+                                  : 0;
+                                const clearHoldRemainingSeconds = Math.max(
+                                  1,
+                                  Math.ceil((JOINT_MARK_CLEAR_HOLD_MS * (1 - clearHoldProgress)) / 1000),
+                                );
                                 return (
                                   <div
                                     key={`${slot.id}-${uIndex}`}
@@ -7503,14 +7520,40 @@ export default function App() {
                                       </div>
                                     </div>
                                     <div className="mt-2">
-                                      <button
-                                        type="button"
-                                        disabled={!activeJoint || !canMarkPoint}
-                                        onClick={() => activeJoint && markJointUPosition(selectedLine, activeJoint.id, slot.id, uIndex)}
-                                        className="w-full rounded bg-orange-600 disabled:opacity-40 disabled:bg-slate-700 px-2 py-1.5 text-[10px] font-black text-white"
-                                      >
-                                        {canMarkPoint ? "标记到达" : "无需标记"}
-                                      </button>
+                                      {manualMark && activeJoint ? (
+                                        <button
+                                          type="button"
+                                          onPointerDown={(event) => {
+                                            event.preventDefault();
+                                            event.currentTarget.setPointerCapture?.(event.pointerId);
+                                            startJointMarkClearHold(selectedLine, activeJoint.id, slot.id, uIndex);
+                                          }}
+                                          onPointerUp={cancelJointMarkClearHold}
+                                          onPointerCancel={cancelJointMarkClearHold}
+                                          onPointerLeave={cancelJointMarkClearHold}
+                                          onContextMenu={(event) => event.preventDefault()}
+                                          className="relative w-full overflow-hidden rounded border border-red-500/40 bg-red-500/10 px-2 py-1.5 text-[10px] font-black text-red-200 active:scale-[0.98]"
+                                        >
+                                          <span
+                                            className="absolute inset-y-0 left-0 bg-red-500/40"
+                                            style={{ width: `${Math.round(clearHoldProgress * 100)}%` }}
+                                          />
+                                          <span className="relative z-10">
+                                            {clearHoldProgress > 0
+                                              ? `继续按住 ${clearHoldRemainingSeconds} 秒`
+                                              : "已标记 · 长按3秒撤销"}
+                                          </span>
+                                        </button>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          disabled={!activeJoint || !canMarkPoint}
+                                          onClick={() => activeJoint && markJointUPosition(selectedLine, activeJoint.id, slot.id, uIndex)}
+                                          className="w-full rounded bg-orange-600 disabled:opacity-40 disabled:bg-slate-700 px-2 py-1.5 text-[10px] font-black text-white"
+                                        >
+                                          {canMarkPoint ? "标记到达" : "无需标记"}
+                                        </button>
+                                      )}
                                     </div>
                                   </div>
                                 );
@@ -7665,6 +7708,15 @@ export default function App() {
             lines={activeLines}
             defaultSpeeds={Object.fromEntries(
               activeLines.map((line) => [line, lineConfigs[line]?.speed || 0]),
+            )}
+            lineSpeedPlans={Object.fromEntries(
+              activeLines.map((line) => [
+                line,
+                {
+                  speed: lineConfigs[line]?.speed || 0,
+                  speedSegments: lineConfigs[line]?.speedSegments || [],
+                },
+              ]),
             )}
             storageKey={getDailyRecordStorageKey(appUser.username, dateKey)}
           />
